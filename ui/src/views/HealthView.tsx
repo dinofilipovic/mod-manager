@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, errorMessage, nexusUrls, openExternal, reveal } from "../api";
 import type { ArchiveOrder } from "../bindings/ArchiveOrder";
+import type { DeploymentCheck } from "../bindings/DeploymentCheck";
+import type { DriftKind } from "../bindings/DriftKind";
 import type { Loadout } from "../bindings/Loadout";
 import type { LogReport } from "../bindings/LogReport";
 import type { FrameworkStatus } from "../bindings/FrameworkStatus";
@@ -100,6 +102,8 @@ export function HealthView({
           </div>
         )}
       </section>
+
+      <GameFolderCheck instanceId={instanceId} deployedAt={loadout.deployed_at} />
 
       <section className="card">
         <h2>Frameworks</h2>
@@ -285,5 +289,96 @@ function FrameworkRow({
         </button>
       )}
     </li>
+  );
+}
+
+const DRIFT_TEXT: Record<DriftKind, { title: string; detail: string }> = {
+  Missing: {
+    title: "Missing from the game folder",
+    detail: "Something deleted these. Apply puts them back.",
+  },
+  ReplacedByGame: {
+    title: "Replaced by the game",
+    detail:
+      "A game update or file check put its own version here. Apply keeps the game's file as the new original, then places the mod's file over it again.",
+  },
+  Modified: {
+    title: "Edited in the game folder",
+    detail:
+      "Changed since they were placed, probably by hand or by the mod itself. They stay as they are; if the mod is updated or removed, a copy is kept in the preserved folder first.",
+  },
+};
+
+/** Compares the files this app placed with what is in the game folder now. */
+function GameFolderCheck({ instanceId, deployedAt }: { instanceId: string; deployedAt: number | null }) {
+  const [check, setCheck] = useState<DeploymentCheck | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = useCallback(async () => {
+    setChecking(true);
+    setError(null);
+    try {
+      setCheck(await api.verifyDeployment(instanceId));
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setChecking(false);
+    }
+  }, [instanceId]);
+
+  useEffect(() => {
+    void run();
+  }, [run, deployedAt]);
+
+  const kinds: DriftKind[] = ["Missing", "ReplacedByGame", "Modified"];
+  return (
+    <section className="card" aria-busy={checking}>
+      <div className="card-head-row">
+        <h2>Game folder</h2>
+        <button onClick={run} disabled={checking}>
+          <Icon name="refresh" className={checking ? "spin" : undefined} /> {checking ? "Checking…" : "Check again"}
+        </button>
+      </div>
+      {error && (
+        <div className="notice notice-error" role="alert">
+          <Icon name="alert" />
+          <div>
+            <strong>Couldn't check the game folder</strong>
+            <p>{error} Rescan from the sidebar if the game was moved, then check again.</p>
+          </div>
+        </div>
+      )}
+      {check && check.drifted.length === 0 && (
+        <p className="status-line">
+          <Icon name="check" /> All {plural(check.checked, "placed file")} are as this app left them.
+        </p>
+      )}
+      {check &&
+        kinds.map((kind) => {
+          const files = check.drifted.filter((d) => d.kind === kind);
+          if (!files.length) return null;
+          return (
+            <div key={kind} className={`notice ${kind === "Modified" ? "notice-info" : "notice-warn"}`}>
+              <Icon name="alert" />
+              <div>
+                <strong>
+                  {DRIFT_TEXT[kind].title}: {plural(files.length, "file")}
+                </strong>
+                <p>{DRIFT_TEXT[kind].detail}</p>
+                <ul className="drift-list">
+                  {files.slice(0, 8).map((f) => (
+                    <li key={f.target}>
+                      <code>{f.target}</code>
+                      {f.mod_name && <span className="muted"> · {f.mod_name}</span>}
+                    </li>
+                  ))}
+                  {files.length > 8 && <li className="muted">and {files.length - 8} more</li>}
+                </ul>
+              </div>
+            </div>
+          );
+        })}
+    </section>
   );
 }

@@ -9,6 +9,7 @@ import type { ArchiveRetention } from "./bindings/ArchiveRetention";
 import type { ArchivesInfo } from "./bindings/ArchivesInfo";
 import type { CleanResult } from "./bindings/CleanResult";
 import type { DeployReport } from "./bindings/DeployReport";
+import type { DeploymentCheck } from "./bindings/DeploymentCheck";
 import type { Download } from "./bindings/Download";
 import type { GameDefinition } from "./bindings/GameDefinition";
 import type { ImportResult } from "./bindings/ImportResult";
@@ -59,6 +60,7 @@ export const api = {
   readLog: (instanceId: string, relativePath: string) => invoke<string[]>("read_log", { instanceId, relativePath }),
   deploy: (instanceId: string) => invoke<DeployReport>("deploy", { instanceId }),
   purge: (instanceId: string) => invoke<DeployReport>("purge", { instanceId }),
+  verifyDeployment: (instanceId: string) => invoke<DeploymentCheck>("verify_deployment", { instanceId }),
   fixDllOverrides: (instanceId: string) => invoke<ScanResult>("fix_dll_overrides", { instanceId }),
   launchGame: (instanceId: string, modded: boolean) => invoke<void>("launch_game", { instanceId, modded }),
 

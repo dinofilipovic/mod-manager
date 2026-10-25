@@ -65,6 +65,11 @@ enum Command {
         #[arg(long)]
         instance: Option<String>,
     },
+    /// Check that deployed files are still as they were placed.
+    Verify {
+        #[arg(long)]
+        instance: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -154,6 +159,27 @@ fn main() -> Result<()> {
             let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
             let report = open_library()?.deploy(&game, &instance)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::Verify { instance } => {
+            let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
+            let check = open_library()?.verify_deployment(&game, &instance)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&check)?);
+            } else if check.drifted.is_empty() {
+                println!(
+                    "All {} placed files are as they were deployed.",
+                    check.checked
+                );
+            } else {
+                for d in &check.drifted {
+                    println!("{:?}: {}", d.kind, d.target);
+                }
+                if check.needs_apply() {
+                    println!(
+                        "\nRun `mm deploy` to fix missing files and adopt files the game replaced."
+                    );
+                }
+            }
         }
         Command::Purge { instance } => {
             let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;

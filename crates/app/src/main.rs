@@ -90,6 +90,7 @@ fn main() {
             commands::read_log,
             commands::deploy,
             commands::purge,
+            commands::verify_deployment,
             commands::fix_dll_overrides,
             commands::launch_game,
             commands::nexus_status,

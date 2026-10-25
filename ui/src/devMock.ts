@@ -233,6 +233,14 @@ export function installDevMock() {
             archives_bytes: 2_150_000_000,
             crossover_installed: true,
           };
+        case "verify_deployment":
+          return {
+            checked: 214,
+            drifted: [
+              { target: "bin/x64/plugins/cyber_engine_tweaks/mods/ImmersiveHUD/settings.json", mod_id: "m2", mod_name: "Immersive HUD", kind: "Modified" },
+              { target: "engine/config/platform/pc/user.ini", mod_id: "m4", mod_name: "Better Vehicle Handling", kind: "ReplacedByGame" },
+            ],
+          };
         case "archives_info":
           return archivesInfo();
         case "set_archive_retention":

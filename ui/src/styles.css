@@ -2057,3 +2057,13 @@ input.grow {
   text-align: right;
   white-space: nowrap;
 }
+
+.drift-list {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  font-size: 12px;
+}
+
+.drift-list code {
+  word-break: break-all;
+}

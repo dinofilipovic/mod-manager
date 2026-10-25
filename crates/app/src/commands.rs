@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use mm_core::archives::{ArchiveRetention, ModArchiveSize};
 use mm_core::collections::{self, Collection};
-use mm_core::deploy::DeployReport;
+use mm_core::deploy::{DeployReport, DeploymentCheck};
 use mm_core::fomod::Selections;
 use mm_core::health::LogReport;
 use mm_core::library::{
@@ -427,6 +427,21 @@ pub async fn deploy(app: AppHandle, instance_id: String) -> CommandResult<Deploy
     blocking(app, move |_, state| {
         let (instance, game, _) = state.resolve(&instance_id)?;
         lock(&state.library).deploy(game, &instance).map_err(err)
+    })
+    .await
+}
+
+/// Deployed files that no longer match what was placed.
+#[tauri::command]
+pub async fn verify_deployment(
+    app: AppHandle,
+    instance_id: String,
+) -> CommandResult<DeploymentCheck> {
+    blocking(app, move |_, state| {
+        let (instance, game, _) = state.resolve(&instance_id)?;
+        lock(&state.library)
+            .verify_deployment(game, &instance)
+            .map_err(err)
     })
     .await
 }
