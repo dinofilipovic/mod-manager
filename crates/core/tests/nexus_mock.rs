@@ -279,3 +279,166 @@ fn live_updated_mods() {
     assert!(!entries.is_empty());
     assert!(nexus::rate_limits().is_some());
 }
+
+#[test]
+fn download_resumes_a_part_file_with_a_range_request() {
+    let tmp = tempfile::tempdir().unwrap();
+    let body: Vec<u8> = (0..200_000u32).flat_map(|i| i.to_le_bytes()).collect();
+    let dest = tmp.path().join("mod.zip");
+    let half = body.len() / 2;
+    std::fs::write(nexus::part_path(&dest), &body[..half]).unwrap();
+
+    let mut server = mockito::Server::new();
+    let resumed = server
+        .mock("GET", "/file/mod.zip")
+        .match_header("range", format!("bytes={half}-").as_str())
+        .with_status(206)
+        .with_header(
+            "content-range",
+            &format!("bytes {half}-{}/{}", body.len() - 1, body.len()),
+        )
+        .with_body(&body[half..])
+        .expect(1)
+        .create();
+    let mut seen = Vec::new();
+    let hashes = client(&server)
+        .download(
+            &format!("{}/file/mod.zip", server.url()),
+            &dest,
+            |done, total| {
+                seen.push((done, total));
+                true
+            },
+        )
+        .unwrap();
+    resumed.assert();
+    assert_eq!(std::fs::read(&dest).unwrap(), body);
+    assert!(!nexus::part_path(&dest).exists());
+    assert_eq!(hashes.size, body.len() as u64);
+    let tmp_copy = tmp.path().join("copy");
+    std::fs::write(&tmp_copy, &body).unwrap();
+    assert_eq!(
+        hashes.sha256,
+        mm_core::fs_util::sha256_file(&tmp_copy).unwrap(),
+        "the hash covers the bytes from before the restart too"
+    );
+    assert_eq!(seen.first().unwrap().1, Some(body.len() as u64));
+}
+
+#[test]
+fn download_starts_over_when_the_server_ignores_the_range() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dest = tmp.path().join("mod.zip");
+    std::fs::write(nexus::part_path(&dest), b"stale bytes").unwrap();
+    let mut server = mockito::Server::new();
+    let _full = server
+        .mock("GET", "/file/mod.zip")
+        .with_status(200)
+        .with_body("fresh whole file")
+        .create();
+    client(&server)
+        .download(&format!("{}/file/mod.zip", server.url()), &dest, |_, _| {
+            true
+        })
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "fresh whole file");
+
+    // Server trouble is worth retrying; an expired link isn't.
+    let _gone = server
+        .mock("GET", "/file/gone.zip")
+        .with_status(410)
+        .create();
+    let _busy = server
+        .mock("GET", "/file/busy.zip")
+        .with_status(503)
+        .create();
+    let gone = client(&server)
+        .download(
+            &format!("{}/file/gone.zip", server.url()),
+            &tmp.path().join("g"),
+            |_, _| true,
+        )
+        .unwrap_err();
+    let busy = client(&server)
+        .download(
+            &format!("{}/file/busy.zip", server.url()),
+            &tmp.path().join("b"),
+            |_, _| true,
+        )
+        .unwrap_err();
+    assert!(!mm_core::queue::is_retryable(&gone));
+    assert!(mm_core::queue::is_retryable(&busy));
+}
+
+#[test]
+fn download_queue_survives_a_restart() {
+    use mm_core::nexus::{Download, DownloadStatus};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("data");
+    let now = 1_761_400_000;
+    {
+        let lib = Library::open(&root).unwrap();
+        let base = Download {
+            game_id: "cyberpunk2077".into(),
+            game_domain: "cyberpunk2077".into(),
+            name: "A mod".into(),
+            nexus_mod_id: 1,
+            nexus_file_id: 2,
+            ..Default::default()
+        };
+        for (id, status, key_expires, created_at) in [
+            ("downloading", DownloadStatus::Downloading, None, 1),
+            ("waiting", DownloadStatus::Queued, None, 2),
+            ("old-link", DownloadStatus::Queued, Some(now as u64 - 10), 3),
+            (
+                "done",
+                DownloadStatus::Done {
+                    mod_id: "m".into(),
+                    replaced_existing: false,
+                    replayed_choices: false,
+                    warnings: vec![],
+                },
+                None,
+                4,
+            ),
+        ] {
+            lib.store()
+                .save_download(&Download {
+                    id: id.into(),
+                    status,
+                    key: key_expires.map(|_| "key".into()),
+                    expires: key_expires,
+                    bytes_done: 1000,
+                    created_at,
+                    ..base.clone()
+                })
+                .unwrap();
+        }
+    }
+    // The app was closed; it opens the library again.
+    let lib = Library::open(&root).unwrap();
+    let queue = mm_core::queue::restore(lib.store().downloads().unwrap(), now);
+    let states: Vec<(&str, &str)> = queue
+        .iter()
+        .map(|d| {
+            let state = match &d.status {
+                DownloadStatus::Queued => "queued",
+                DownloadStatus::Failed { .. } => "failed",
+                DownloadStatus::Done { .. } => "done",
+                _ => "other",
+            };
+            (d.id.as_str(), state)
+        })
+        .collect();
+    assert_eq!(
+        states,
+        [
+            ("downloading", "queued"),
+            ("waiting", "queued"),
+            ("old-link", "failed"),
+            ("done", "done")
+        ]
+    );
+    assert_eq!(queue[0].bytes_done, 1000, "progress kept for the resume");
+    assert_eq!(mm_core::queue::next_ready(&queue, now), Some(0));
+}

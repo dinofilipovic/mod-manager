@@ -8,7 +8,7 @@ use ts_rs::TS;
 
 use crate::archives::{ArchiveRecord, ArchiveSource};
 use crate::error::Result;
-use crate::nexus::Changelog;
+use crate::nexus::{Changelog, Download, DownloadStatus};
 
 pub const SCHEMA_VERSION: i32 = 3;
 
@@ -108,6 +108,28 @@ const MIGRATION_3: &str = "
 ALTER TABLE mods ADD COLUMN nexus_updated_at INTEGER;
 ALTER TABLE mods ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE mods ADD COLUMN ignored_update_file_id INTEGER;
+
+CREATE TABLE downloads (
+    id TEXT PRIMARY KEY,
+    game_id TEXT NOT NULL,
+    game_domain TEXT NOT NULL,
+    instance_id TEXT,
+    name TEXT NOT NULL,
+    version TEXT,
+    file_name TEXT,
+    nexus_mod_id INTEGER NOT NULL,
+    nexus_file_id INTEGER NOT NULL,
+    bytes_done INTEGER NOT NULL,
+    bytes_total INTEGER,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    retry_at INTEGER,
+    replaces TEXT,
+    nxm_key TEXT,
+    expires INTEGER,
+    archive_id INTEGER,
+    created_at INTEGER NOT NULL
+);
 
 CREATE TABLE changelogs (
     game_domain TEXT NOT NULL,
@@ -560,6 +582,82 @@ impl Store {
              WHERE id = ?1",
             params![id, file_id],
         )?;
+        Ok(())
+    }
+
+    // Download queue
+
+    pub fn save_download(&self, d: &Download) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO downloads (id, game_id, game_domain, instance_id, name, version, file_name,
+                nexus_mod_id, nexus_file_id, bytes_done, bytes_total, status, attempts, retry_at,
+                replaces, nxm_key, expires, archive_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+             ON CONFLICT(id) DO UPDATE SET instance_id = ?4, name = ?5, version = ?6, file_name = ?7,
+                bytes_done = ?10, bytes_total = ?11, status = ?12, attempts = ?13, retry_at = ?14,
+                replaces = ?15, nxm_key = ?16, expires = ?17, archive_id = ?18",
+            params![
+                d.id,
+                d.game_id,
+                d.game_domain,
+                d.instance_id,
+                d.name,
+                d.version,
+                d.file_name,
+                d.nexus_mod_id,
+                d.nexus_file_id,
+                d.bytes_done as i64,
+                d.bytes_total.map(|b| b as i64),
+                serde_json::to_string(&d.status).unwrap_or_default(),
+                d.attempts,
+                d.retry_at,
+                d.replaces,
+                d.key,
+                d.expires.map(|e| e as i64),
+                d.archive_id,
+                d.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The queue, oldest first.
+    pub fn downloads(&self) -> Result<Vec<Download>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM downloads ORDER BY created_at, rowid")?;
+        let rows = stmt.query_map([], |r| {
+            let status: String = r.get("status")?;
+            Ok(Download {
+                id: r.get("id")?,
+                game_id: r.get("game_id")?,
+                game_domain: r.get("game_domain")?,
+                instance_id: r.get("instance_id")?,
+                name: r.get("name")?,
+                version: r.get("version")?,
+                file_name: r.get("file_name")?,
+                nexus_mod_id: r.get("nexus_mod_id")?,
+                nexus_file_id: r.get("nexus_file_id")?,
+                bytes_done: r.get::<_, i64>("bytes_done")? as u64,
+                bytes_total: r.get::<_, Option<i64>>("bytes_total")?.map(|b| b as u64),
+                status: serde_json::from_str(&status).unwrap_or(DownloadStatus::Failed {
+                    message: "This download's state couldn't be read; start it again.".into(),
+                }),
+                attempts: r.get("attempts")?,
+                retry_at: r.get("retry_at")?,
+                replaces: r.get("replaces")?,
+                key: r.get("nxm_key")?,
+                expires: r.get::<_, Option<i64>>("expires")?.map(|e| e as u64),
+                archive_id: r.get("archive_id")?,
+                created_at: r.get("created_at")?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn delete_download(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM downloads WHERE id = ?1", [id])?;
         Ok(())
     }
 

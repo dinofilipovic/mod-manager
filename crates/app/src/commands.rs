@@ -563,17 +563,17 @@ pub async fn list_downloads(app: AppHandle) -> CommandResult<Vec<Download>> {
 
 #[tauri::command]
 pub async fn clear_finished_downloads(app: AppHandle) -> CommandResult<Vec<Download>> {
-    blocking(app, |_, state| {
-        let mut downloads = lock(&state.downloads);
-        downloads.retain(|d| {
-            !matches!(
-                d.status,
-                nexus::DownloadStatus::Done { .. } | nexus::DownloadStatus::Failed { .. }
-            )
-        });
-        Ok(downloads.clone())
-    })
-    .await
+    blocking(app, |app, _| Ok(downloads::clear_finished(app))).await
+}
+
+#[tauri::command]
+pub async fn retry_download(app: AppHandle, id: String) -> CommandResult<()> {
+    blocking(app, move |app, _| downloads::retry(app, &id)).await
+}
+
+#[tauri::command]
+pub async fn cancel_download(app: AppHandle, id: String) -> CommandResult<()> {
+    blocking(app, move |app, _| downloads::cancel(app, &id)).await
 }
 
 #[derive(Serialize, TS)]

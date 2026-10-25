@@ -281,12 +281,14 @@ impl NexusFileList {
     }
 }
 
-/// A download in the app's queue.
-#[derive(Debug, Clone, Serialize, TS)]
+/// A download in the app's queue. Kept in the library, so the queue
+/// survives a restart.
+#[derive(Debug, Clone, Default, Serialize, TS)]
 #[ts(export)]
 pub struct Download {
     pub id: String,
     pub game_id: String,
+    pub game_domain: String,
     pub instance_id: Option<String>,
     pub name: String,
     pub version: Option<String>,
@@ -298,12 +300,33 @@ pub struct Download {
     #[ts(type = "number | null")]
     pub bytes_total: Option<u64>,
     pub status: DownloadStatus,
+    /// Failed attempts so far.
+    pub attempts: u32,
+    /// When the next attempt starts, Unix seconds.
+    #[ts(type = "number | null")]
+    pub retry_at: Option<i64>,
+    /// Installed mod this download updates.
+    pub replaces: Option<String>,
+    /// The `nxm://` link's key and expiry (free accounts need them).
+    #[serde(skip)]
+    #[ts(skip)]
+    pub key: Option<String>,
+    #[serde(skip)]
+    #[ts(skip)]
+    pub expires: Option<u64>,
+    /// The finished archive in the archive store.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub archive_id: Option<i64>,
+    #[ts(type = "number")]
+    pub created_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "state")]
 #[ts(export)]
 pub enum DownloadStatus {
+    #[default]
     Queued,
     Downloading,
     Installing,
@@ -367,7 +390,7 @@ impl NexusClient {
             .timeout(Duration::from_secs(30))
             .send()
             .map_err(|e| {
-                Error::Nexus(if e.is_timeout() {
+                Error::Network(if e.is_timeout() {
                     "Nexus Mods didn't answer in time. Check your internet connection and try again.".into()
                 } else {
                     format!("Couldn't reach Nexus Mods. Check your internet connection. ({e})")
@@ -383,11 +406,20 @@ impl NexusClient {
                 .ok()
                 .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
                 .unwrap_or(body);
+            if status.as_u16() == 429 {
+                return Err(Error::Network(
+                    "Nexus Mods rate limit reached: you've used this hour's requests. Try again after the hour; Settings shows when they reset.".into(),
+                ));
+            }
+            if status.is_server_error() {
+                return Err(Error::Network(format!(
+                    "Nexus Mods had a problem ({status}). Try again in a few minutes."
+                )));
+            }
             return Err(Error::Nexus(match status.as_u16() {
                 401 => "Nexus Mods didn't accept this API key. Copy the whole Personal API Key from your Nexus account page and try again.".into(),
                 403 => format!("Nexus Mods refused the request: {message}"),
                 404 => "Not found on Nexus Mods.".into(),
-                429 => "Nexus Mods rate limit reached: you've used this hour's requests. Try again after the hour; Settings shows when they reset.".into(),
                 code => format!("Nexus Mods error {code}: {message}"),
             }));
         }
@@ -463,30 +495,71 @@ impl NexusClient {
     }
 
     /// Downloads `url` to `dest`, calling `progress(done, total)` as bytes
-    /// arrive, and hashes the bytes on the way. Writes to a `.part` file
-    /// first so a failed download never looks complete.
+    /// arrive, and hashes the bytes on the way. Writes to `dest` + `.part`
+    /// first so a failed download never looks complete; a `.part` left by an
+    /// interrupted attempt is continued with an HTTP range request when the
+    /// server supports it. Network problems are [`Error::Network`].
+    /// `progress` returns false to stop (the `.part` file stays).
     pub fn download(
         &self,
         url: &str,
         dest: &Path,
-        mut progress: impl FnMut(u64, Option<u64>),
+        mut progress: impl FnMut(u64, Option<u64>) -> bool,
     ) -> Result<crate::archives::Hashes> {
-        let mut response = self
-            .http
-            .get(url)
-            .send()
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| Error::Nexus(format!("download failed: {e}")))?;
-        let total = response.content_length();
-        let part = dest.with_extension("part");
-        let mut file = fs::File::create(&part).map_err(|e| Error::io(&part, e))?;
-        let mut buffer = vec![0u8; 256 * 1024];
-        let mut done = 0u64;
+        let part = part_path(dest);
+        let have = fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+        let mut request = self.http.get(url);
+        if have > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={have}-"));
+        }
+        let mut response = request.send().map_err(|e| {
+            Error::Network(format!(
+                "Couldn't reach the download server ({e}). It is retried automatically."
+            ))
+        })?;
+        let status = response.status();
+        let resuming = have > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
+        if !status.is_success() {
+            let message = format!("The download server answered {status}.");
+            return Err(if status.is_server_error() || status.as_u16() == 429 {
+                Error::Network(format!("{message} It is retried automatically."))
+            } else {
+                Error::Nexus(format!(
+                    "{message} The download link may have expired; start the download again from Nexus Mods."
+                ))
+            });
+        }
         let mut hasher = crate::archives::Hasher::default();
+        let mut file = if resuming {
+            // The bytes already there count towards the hashes.
+            let mut existing = fs::File::open(&part).map_err(|e| Error::io(&part, e))?;
+            let mut buffer = vec![0u8; 256 * 1024];
+            loop {
+                let n = existing
+                    .read(&mut buffer)
+                    .map_err(|e| Error::io(&part, e))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..n]);
+            }
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&part)
+                .map_err(|e| Error::io(&part, e))?
+        } else {
+            fs::File::create(&part).map_err(|e| Error::io(&part, e))?
+        };
+        let offset = if resuming { have } else { 0 };
+        let total = response.content_length().map(|len| len + offset);
+        let mut buffer = vec![0u8; 256 * 1024];
+        let mut done = offset;
         loop {
-            let n = response
-                .read(&mut buffer)
-                .map_err(|e| Error::Nexus(format!("download interrupted: {e}")))?;
+            let n = response.read(&mut buffer).map_err(|e| {
+                Error::Network(format!(
+                    "The download was interrupted ({e}). It continues where it stopped."
+                ))
+            })?;
             if n == 0 {
                 break;
             }
@@ -494,17 +567,30 @@ impl NexusClient {
                 .map_err(|e| Error::io(&part, e))?;
             hasher.update(&buffer[..n]);
             done += n as u64;
-            progress(done, total);
+            if !progress(done, total) {
+                return Err(Error::Nexus(CANCELLED.into()));
+            }
         }
         file.flush().map_err(|e| Error::io(&part, e))?;
         drop(file);
         if total.is_some_and(|t| t != done) {
-            let _ = fs::remove_file(&part);
-            return Err(Error::Nexus("download ended early; try again".into()));
+            return Err(Error::Network(
+                "The download ended early. It continues where it stopped.".into(),
+            ));
         }
         fs::rename(&part, dest).map_err(|e| Error::io(dest, e))?;
         Ok(hasher.finish())
     }
+}
+
+/// The error message of a download stopped by the user.
+pub const CANCELLED: &str = "Download cancelled.";
+
+/// Where a download is written until it is complete.
+pub fn part_path(dest: &Path) -> std::path::PathBuf {
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(".part");
+    dest.with_file_name(name)
 }
 
 /// The API key in the OS credential store (Keychain, Credential Manager,

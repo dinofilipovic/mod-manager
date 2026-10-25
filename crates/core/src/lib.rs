@@ -16,6 +16,7 @@ pub mod health;
 pub mod installer;
 pub mod library;
 pub mod nexus;
+pub mod queue;
 mod registry;
 pub mod requirements;
 pub mod saves;

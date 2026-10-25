@@ -191,6 +191,51 @@ const downloads: Download[] = [
     bytes_done: 6_000_000,
     bytes_total: 14_000_000,
     status: { state: "Downloading" },
+    game_domain: "cyberpunk2077",
+    attempts: 0,
+    retry_at: null,
+    replaces: null,
+    created_at: now - 60,
+  },
+  {
+    id: "d2",
+    game_id: "cyberpunk2077",
+    instance_id: INSTANCE,
+    name: "Better Vehicle Handling",
+    version: "2.1",
+    file_name: "BetterVehicleHandling-2.1.zip",
+    nexus_mod_id: 3004,
+    nexus_file_id: 9,
+    bytes_done: 2_000_000,
+    bytes_total: 8_000_000,
+    status: { state: "Queued" },
+    game_domain: "cyberpunk2077",
+    attempts: 1,
+    retry_at: now + 25,
+    replaces: null,
+    created_at: now - 50,
+  },
+  {
+    id: "d3",
+    game_id: "cyberpunk2077",
+    instance_id: INSTANCE,
+    name: "Mod 4575",
+    version: null,
+    file_name: null,
+    nexus_mod_id: 4575,
+    nexus_file_id: 114235,
+    bytes_done: 0,
+    bytes_total: null,
+    status: {
+      state: "Failed",
+      message:
+        'This download link expired while the app was closed. Click "Mod Manager Download" on the mod page again (Premium members can press Retry).',
+    },
+    game_domain: "cyberpunk2077",
+    attempts: 0,
+    retry_at: null,
+    replaces: null,
+    created_at: now - 40,
   },
 ];
 
@@ -230,6 +275,9 @@ export function installDevMock() {
           return { user: { user_id: 1, name: "demo", is_premium: false, profile_url: null }, error: null };
         case "list_downloads":
           return downloads;
+        case "retry_download":
+        case "cancel_download":
+          return null;
         case "app_info":
           return {
             version: "0.1.0",

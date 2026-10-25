@@ -100,7 +100,7 @@ export function DownloadsView({
       )}
 
       {downloads.length === 0 ? (
-        <p className="muted empty-note">Nothing downloaded in this session yet.</p>
+        <p className="muted empty-note">The download queue is empty.</p>
       ) : (
         <ul className="downloads">
           {downloads.map((d) => {
@@ -118,11 +118,45 @@ export function DownloadsView({
                     <span style={progress !== null && state === "Downloading" ? { width: `${progress}%` } : undefined} />
                   </div>
                 )}
+                {state === "Queued" && d.retry_at && (
+                  <p className="muted small">
+                    Attempt {d.attempts} failed; trying again {d.retry_at > Date.now() / 1000 ? `in ${Math.ceil(d.retry_at - Date.now() / 1000)}s` : "now"}.
+                  </p>
+                )}
                 <div className="download-meta muted">
                   {d.file_name ?? `File ${d.nexus_file_id}`}
                   {d.bytes_total ? ` · ${formatBytes(state === "Downloading" ? d.bytes_done : d.bytes_total)}${state === "Downloading" ? ` of ${formatBytes(d.bytes_total)}` : ""}` : ""}
                 </div>
-                {d.status.state === "Failed" && <p className="error">{d.status.message}</p>}
+                {d.status.state === "Failed" && (
+                  <div className="row">
+                    <p className="error">{d.status.message}</p>
+                    <button
+                      onClick={async () => {
+                        try {
+                          await api.retryDownload(d.id);
+                        } catch (e) {
+                          toast("error", "Couldn't retry", errorMessage(e));
+                        }
+                      }}
+                    >
+                      <Icon name="refresh" /> Retry
+                    </button>
+                  </div>
+                )}
+                {(state === "Queued" || state === "Downloading") && (
+                  <button
+                    className="link-button small"
+                    onClick={async () => {
+                      try {
+                        await api.cancelDownload(d.id);
+                      } catch (e) {
+                        toast("error", "Couldn't cancel", errorMessage(e));
+                      }
+                    }}
+                  >
+                    Cancel
+                  </button>
+                )}
                 {d.status.state === "AwaitingChoices" && (
                   <div className="row">
                     <span className="muted small">This mod has installer options.</span>

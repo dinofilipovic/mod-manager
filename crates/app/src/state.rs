@@ -1,7 +1,7 @@
 //! Shared app state: the mod library, the last scan and the download queue.
 
-use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Condvar, Mutex, MutexGuard};
 
 use mm_core::library::Library;
 use mm_core::nexus::Download;
@@ -12,6 +12,10 @@ pub struct AppState {
     pub games: Vec<GameDefinition>,
     pub scan: Mutex<Option<ScanResult>>,
     pub downloads: Mutex<Vec<Download>>,
+    /// Wakes the download workers when something is queued.
+    pub queue_wake: Condvar,
+    /// Running downloads the user stopped.
+    pub cancelled: Mutex<HashSet<String>>,
     /// The install the user is looking at, per game; `nxm://` downloads go there.
     pub current_instance: Mutex<HashMap<String, String>>,
     /// Downloads waiting on FOMOD choices: installer token -> download id.
@@ -39,6 +43,8 @@ impl AppState {
             games,
             scan: Mutex::new(None),
             downloads: Mutex::new(Vec::new()),
+            queue_wake: Condvar::new(),
+            cancelled: Mutex::new(HashSet::new()),
             current_instance: Mutex::new(HashMap::new()),
             fomod_downloads: Mutex::new(HashMap::new()),
         }

@@ -2,6 +2,19 @@
 import type { DownloadStatus } from "./DownloadStatus";
 
 /**
- * A download in the app's queue.
+ * A download in the app's queue. Kept in the library, so the queue
+ * survives a restart.
  */
-export type Download = { id: string, game_id: string, instance_id: string | null, name: string, version: string | null, file_name: string | null, nexus_mod_id: number, nexus_file_id: number, bytes_done: number, bytes_total: number | null, status: DownloadStatus, };
+export type Download = { id: string, game_id: string, game_domain: string, instance_id: string | null, name: string, version: string | null, file_name: string | null, nexus_mod_id: number, nexus_file_id: number, bytes_done: number, bytes_total: number | null, status: DownloadStatus, 
+/**
+ * Failed attempts so far.
+ */
+attempts: number, 
+/**
+ * When the next attempt starts, Unix seconds.
+ */
+retry_at: number | null, 
+/**
+ * Installed mod this download updates.
+ */
+replaces: string | null, created_at: number, };

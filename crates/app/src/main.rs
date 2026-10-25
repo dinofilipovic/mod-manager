@@ -52,6 +52,7 @@ fn main() {
             // Background Nexus work respects the budget left from the last run.
             library.load_rate_limits();
             app.manage(AppState::new(library, games));
+            downloads::start_workers(app.handle());
 
             #[cfg(any(target_os = "linux", windows))]
             if let Err(e) = app.deep_link().register_all() {
@@ -101,6 +102,8 @@ fn main() {
             commands::handle_nxm,
             commands::list_downloads,
             commands::clear_finished_downloads,
+            commands::retry_download,
+            commands::cancel_download,
             commands::check_updates,
             commands::mod_changelog,
             commands::set_mod_pinned,

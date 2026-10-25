@@ -76,6 +76,8 @@ export const api = {
   handleNxm: (url: string) => invoke<string>("handle_nxm", { url }),
   listDownloads: () => invoke<Download[]>("list_downloads"),
   clearFinishedDownloads: () => invoke<Download[]>("clear_finished_downloads"),
+  retryDownload: (id: string) => invoke<void>("retry_download", { id }),
+  cancelDownload: (id: string) => invoke<void>("cancel_download", { id }),
   checkUpdates: (instanceId: string, automatic = false) =>
     invoke<UpdateCheckResult>("check_updates", { instanceId, automatic }),
   modChangelog: (modId: string, refresh = false) => invoke<ModChangelog>("mod_changelog", { modId, refresh }),

@@ -30,6 +30,10 @@ pub enum Error {
     #[error("{0}")]
     Nexus(String),
 
+    /// A network problem that may go away: worth trying again later.
+    #[error("{0}")]
+    Network(String),
+
     #[error("{0}")]
     Wine(String),
 
