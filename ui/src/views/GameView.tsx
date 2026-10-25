@@ -46,8 +46,13 @@ function describeReport(r: DeployReport): string {
     r.replaced && `${r.replaced} replaced`,
     r.removed && `${r.removed} removed`,
     r.restored && `${r.restored} originals restored`,
+    r.adopted && `${r.adopted} kept as updated by the game`,
   ].filter(Boolean);
-  return parts.length ? `${parts.join(", ")}.` : "Nothing to change.";
+  const summary = parts.length ? `${parts.join(", ")}.` : "Nothing to change.";
+  const preserved = r.preserved.length
+    ? ` ${r.preserved.length === 1 ? "1 edited file was" : `${r.preserved.length} edited files were`} copied to the preserved folder first.`
+    : "";
+  return summary + preserved;
 }
 
 export function GameView({
@@ -165,6 +170,7 @@ export function GameView({
     const report = await run("Applying", () => api.deploy(id));
     if (report) {
       toast("success", "Game folder updated", describeReport(report));
+      if (report.warnings.length) toast("info", "Check these files", report.warnings.join("\n"));
       await reload();
     }
     return report;

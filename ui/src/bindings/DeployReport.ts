@@ -4,4 +4,14 @@ export type DeployReport = { added: number, removed: number, replaced: number, u
 /**
  * Original game files moved aside because a mod replaces them.
  */
-backed_up: number, restored: number, cloned: number, linked: number, copied: number, };
+backed_up: number, restored: number, cloned: number, linked: number, copied: number, 
+/**
+ * Deployed files the game replaced (an update or file check); the game's
+ * version was kept and the outdated backup dropped.
+ */
+adopted: number, 
+/**
+ * Deployed files edited in the game folder, copied to the preserved
+ * folder before being replaced or removed.
+ */
+preserved: Array<string>, warnings: Array<string>, };

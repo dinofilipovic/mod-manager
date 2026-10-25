@@ -18,19 +18,19 @@ use ts_rs::TS;
 use walkdir::WalkDir;
 
 use crate::archive;
-use crate::deploy::{self, DeployReport, DesiredFile};
+use crate::deploy::{self, DeployReport, DeploymentCheck, DesiredFile};
 use crate::detect::GameInstance;
 use crate::env::Environment;
 use crate::error::{Error, Result};
 use crate::fomod;
-use crate::fs_util::resolve_case_insensitive;
+use crate::fs_util::{resolve_case_insensitive, sha256_file};
 use crate::game::GameDefinition;
 use crate::health;
 use crate::installer::{self, InstallPlan};
 use crate::nexus::{NexusMatch, parse_archive_name};
 use crate::requirements::{self, FrameworkState, FrameworkStatus, MissingRequirement, ModFiles};
 use crate::saves;
-use crate::store::{ModRecord, Profile, ProfileEntry, Store};
+use crate::store::{ModFile, ModRecord, Profile, ProfileEntry, Store};
 
 /// What is known about a mod before installing it.
 #[derive(Debug, Clone, Default)]
@@ -232,13 +232,32 @@ impl Library {
             fs::create_dir_all(&path).map_err(|e| Error::io(&path, e))?;
         }
         let store = Store::open(&root.join("library.db"))?;
-        let library = Self {
+        let mut library = Self {
             store,
             root: root.to_path_buf(),
             pending: HashMap::new(),
         };
         library.clean_tmp();
+        library.recover_deployments()?;
         Ok(library)
+    }
+
+    /// Finishes or undoes deployment steps cut short when the app last
+    /// stopped, so the record matches the game folder again.
+    fn recover_deployments(&mut self) -> Result<()> {
+        for entry in self.store.pending_journal()? {
+            // Instance ids start with the game id, which says which folders
+            // must stay even when empty.
+            let protected = crate::game::builtin_games()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|g| entry.instance_id.starts_with(&format!("{}-", g.id)))
+                .map(|g| protected_dirs(&g))
+                .unwrap_or_default();
+            let backups = self.backup_dir(&entry.instance_id);
+            deploy::recover(&entry, &backups, &protected, &mut self.store)?;
+        }
+        self.store.clear_finished_journal()
     }
 
     pub fn root(&self) -> &Path {
@@ -259,6 +278,11 @@ impl Library {
 
     fn backup_dir(&self, instance_id: &str) -> PathBuf {
         self.root.join("backups").join(instance_id)
+    }
+
+    /// Where hand-edited deployed files are copied before being replaced.
+    pub fn preserved_dir(&self, instance_id: &str) -> PathBuf {
+        self.root.join("preserved").join(instance_id)
     }
 
     fn clean_tmp(&self) {
@@ -493,6 +517,7 @@ impl Library {
         // Stage into a fresh folder, then swap it in.
         let staging = self.root.join("tmp").join(format!("{id}.staging"));
         let mut size_bytes = 0u64;
+        let mut files = Vec::with_capacity(plan.files.len());
         for file in &plan.files {
             let from = join_relative(extracted, &file.source);
             let to = join_relative(&staging, &file.target);
@@ -502,7 +527,14 @@ impl Library {
             fs::rename(&from, &to)
                 .or_else(|_| fs::copy(&from, &to).map(|_| ()))
                 .map_err(|e| Error::io(&to, e))?;
-            size_bytes += fs::metadata(&to).map(|m| m.len()).unwrap_or(0);
+            let size = fs::metadata(&to).map(|m| m.len()).unwrap_or(0);
+            size_bytes += size;
+            // Hashed once here, so deploying and checking drift don't have to.
+            files.push(ModFile {
+                target: file.target.clone(),
+                size: Some(size),
+                sha256: Some(sha256_file(&to).map_err(|e| Error::io(&to, e))?),
+            });
         }
         let final_dir = self.mod_dir(&id);
         if final_dir.exists() {
@@ -531,8 +563,7 @@ impl Library {
             update_file_id: None,
             update_version: None,
         };
-        let targets: Vec<String> = plan.files.iter().map(|f| f.target.clone()).collect();
-        self.store.insert_mod(&record, &targets)?;
+        self.store.insert_mod(&record, &files)?;
 
         if existing.is_none()
             && let Some(instance_id) = instance_id
@@ -837,7 +868,13 @@ impl Library {
                 desired
                     .get(&d.target.to_ascii_lowercase())
                     .is_none_or(|w| w.mod_id != d.mod_id || w.revision != d.revision)
-            });
+            })
+            || deploy::verify(
+                &instance.install_path,
+                &deployed,
+                self.store.game_updated_at(&instance.id)?,
+            )
+            .needs_apply();
 
         Ok(Loadout {
             instance_id: instance.id.clone(),
@@ -943,7 +980,7 @@ impl Library {
             };
             let dir = self.mod_dir(&record.id);
             let mut archives = Vec::new();
-            for target in self.store.mod_files(&record.id)? {
+            for ModFile { target, sha256, .. } in self.store.mod_file_details(&record.id)? {
                 if let (Some(folder), Some(order)) = (&order_folder, &game.load_order)
                     && let Some((parent, name)) = target.rsplit_once('/')
                     && parent.eq_ignore_ascii_case(folder)
@@ -960,6 +997,7 @@ impl Library {
                         target,
                         mod_id: record.id.clone(),
                         revision: record.revision,
+                        sha256,
                     },
                 );
             }
@@ -1035,6 +1073,7 @@ impl Library {
             mod_id: LOAD_ORDER_FILE_OWNER.into(),
             revision,
             source: path,
+            sha256: None,
         })
     }
 
@@ -1064,26 +1103,50 @@ impl Library {
         instance: &GameInstance,
         desired: &BTreeMap<String, DesiredFile>,
     ) -> Result<DeployReport> {
-        let current = self.store.deployed_files(&instance.id)?;
-        // Folders mods are dropped into stay even when empty; a framework's
-        // own folder (no extensions or marker) is removed with it.
-        let protected: Vec<String> = game
-            .layout
-            .iter()
-            .filter(|t| !t.extensions.is_empty() || t.marker_file.is_some())
-            .map(|t| t.path.clone())
-            .chain(game.root_markers.iter().cloned())
-            .collect();
-        let (report, deployed) = deploy::deploy(
+        // A game update noticed now still counts for the files it replaced.
+        let game_updated_at = if instance.fingerprint.is_empty() {
+            None
+        } else {
+            self.store
+                .observe_game(&instance.id, &instance.fingerprint, now())?
+        };
+        let protected = protected_dirs(game);
+        let backups = self.backup_dir(&instance.id);
+        let preserved = self.preserved_dir(&instance.id);
+        let deployment = deploy::Deployment {
+            instance_id: &instance.id,
+            game_root: &instance.install_path,
+            backup_root: &backups,
+            preserved_root: &preserved,
+            protected_dirs: &protected,
+            game_updated_at,
+        };
+        deploy::deploy(&deployment, desired, &mut self.store)
+    }
+
+    /// Deployed files that no longer match what was placed: missing, edited
+    /// by hand, or replaced by the game.
+    pub fn verify_deployment(
+        &self,
+        game: &GameDefinition,
+        instance: &GameInstance,
+    ) -> Result<DeploymentCheck> {
+        let deployed = self.store.deployed_files(&instance.id)?;
+        let mut check = deploy::verify(
             &instance.install_path,
-            &self.backup_dir(&instance.id),
-            desired,
-            &current,
-            &protected,
-        )?;
-        self.store
-            .set_deployed_files(&instance.id, &deployed, now())?;
-        Ok(report)
+            &deployed,
+            self.store.game_updated_at(&instance.id)?,
+        );
+        let names: HashMap<String, String> = self
+            .store
+            .mods_for_game(&game.id)?
+            .into_iter()
+            .map(|m| (m.id, m.name))
+            .collect();
+        for d in &mut check.drifted {
+            d.mod_name = names.get(&d.mod_id).cloned();
+        }
+        Ok(check)
     }
 
     /// The game's logs with their errors and warnings, attributed to the
@@ -1324,6 +1387,17 @@ impl Library {
             .map(|m| m.len())
             .sum()
     }
+}
+
+/// Folders mods are dropped into stay even when empty; a framework's own
+/// folder (no extensions or marker) is removed with it.
+fn protected_dirs(game: &GameDefinition) -> Vec<String> {
+    game.layout
+        .iter()
+        .filter(|t| !t.extensions.is_empty() || t.marker_file.is_some())
+        .map(|t| t.path.clone())
+        .chain(game.root_markers.iter().cloned())
+        .collect()
 }
 
 fn join_relative(base: &Path, relative: &str) -> PathBuf {

@@ -204,7 +204,10 @@ export function installDevMock() {
           return ["archive/pc/mod/example.archive", "r6/scripts/Example/main.reds"];
         case "deploy":
           pending = false;
-          return { added: 12, removed: 1, replaced: 0, unchanged: 30, backed_up: 0, restored: 0, cloned: 12, linked: 0, copied: 0 };
+          return {
+            added: 12, removed: 1, replaced: 0, unchanged: 30, backed_up: 0, restored: 0, cloned: 12, linked: 0, copied: 0,
+            adopted: 0, preserved: ["bin/x64/plugins/cyber_engine_tweaks/mods/ImmersiveHUD/settings.json"], warnings: [],
+          };
         case "nexus_status":
           return { user: { user_id: 1, name: "demo", is_premium: false, profile_url: null }, error: null };
         case "list_downloads":
