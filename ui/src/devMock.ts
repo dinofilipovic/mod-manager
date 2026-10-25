@@ -139,10 +139,12 @@ let mods: LoadoutMod[] = [
   { mod: mod("hud", "Immersive HUD", ["cet", "redscript"], { version: "0.9" }), enabled: true, overrides: [], overridden_by: [], conflict_files: 0, missing_requirements: [{ framework_id: "redscript", name: "redscript", nexus_mod_id: 1511, disabled_mod_id: null }] },
   { mod: mod("redmod", "Night City Radio Expanded", ["redmod"]), enabled: true, overrides: [], overridden_by: [], conflict_files: 0, missing_requirements: [] },
 ];
-let retention: "KeepAll" | "LastTwo" | "DeleteAfterInstall" = "LastTwo";
+let retention: "KeepAll" | "LastRevisions" | "DeleteAfterInstall" = "LastRevisions";
+let revisionsKept = 2;
 let unusedArchiveBytes = 412_000_000;
 const archivesInfo = () => ({
   retention,
+  revisions_kept: revisionsKept,
   total_bytes: 2_150_000_000,
   unused_count: unusedArchiveBytes ? 3 : 0,
   unused_bytes: unusedArchiveBytes,
@@ -284,6 +286,18 @@ export function installDevMock() {
             daily_reset: now + 40_000,
             observed_at: now - 60,
           };
+        case "set_revisions_kept":
+          revisionsKept = a.count as number;
+          return archivesInfo();
+        case "mod_revisions":
+          return [
+            { revision: 3, version: "1.38.0", installed_at: now - 3600, archive_kept: true, has_choices: true, current: true },
+            { revision: 2, version: "1.37.1", installed_at: now - 86400 * 20, archive_kept: true, has_choices: true, current: false },
+            { revision: 1, version: "1.37.0", installed_at: now - 86400 * 45, archive_kept: false, has_choices: true, current: false },
+          ];
+        case "reinstall_mod":
+        case "rollback_mod":
+          return { outcome: { mod: mods[0].mod, skipped: [], warnings: [], replaced_existing: true, replayed_choices: true }, fomod: null };
         case "archives_info":
           return archivesInfo();
         case "set_archive_retention":

@@ -28,6 +28,8 @@ import type { NexusStatus } from "./bindings/NexusStatus";
 import type { NexusUser } from "./bindings/NexusUser";
 import type { ScanResult } from "./bindings/ScanResult";
 import type { ModChangelog } from "./bindings/ModChangelog";
+import type { ReinstallResult } from "./bindings/ReinstallResult";
+import type { RevisionInfo } from "./bindings/RevisionInfo";
 import type { RateLimits } from "./bindings/RateLimits";
 import type { UpdateAllResult } from "./bindings/UpdateAllResult";
 import type { UpdateCheckResult } from "./bindings/UpdateCheckResult";
@@ -102,6 +104,11 @@ export const api = {
     invoke<void>("export_profile", { instanceId, profileId, path }),
   importProfile: (instanceId: string, path: string) => invoke<ImportReport>("import_profile", { instanceId, path }),
 
+  modRevisions: (modId: string) => invoke<RevisionInfo[]>("mod_revisions", { modId }),
+  reinstallMod: (instanceId: string, modId: string, revision: number, changeOptions: boolean) =>
+    invoke<ReinstallResult>("reinstall_mod", { instanceId, modId, revision, changeOptions }),
+  rollbackMod: (instanceId: string, modId: string) => invoke<ReinstallResult>("rollback_mod", { instanceId, modId }),
+  setRevisionsKept: (count: number) => invoke<ArchivesInfo>("set_revisions_kept", { count }),
   archivesInfo: () => invoke<ArchivesInfo>("archives_info"),
   setArchiveRetention: (retention: ArchiveRetention) => invoke<ArchivesInfo>("set_archive_retention", { retention }),
   cleanUnusedArchives: () => invoke<CleanResult>("clean_unused_archives"),

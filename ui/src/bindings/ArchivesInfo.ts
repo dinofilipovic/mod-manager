@@ -2,7 +2,11 @@
 import type { ArchiveRetention } from "./ArchiveRetention";
 import type { ModArchiveSize } from "./ModArchiveSize";
 
-export type ArchivesInfo = { retention: ArchiveRetention, total_bytes: number, unused_count: number, unused_bytes: number, 
+export type ArchivesInfo = { retention: ArchiveRetention, 
+/**
+ * Revisions per mod whose archives are kept under `LastRevisions`.
+ */
+revisions_kept: number, total_bytes: number, unused_count: number, unused_bytes: number, 
 /**
  * Largest first.
  */

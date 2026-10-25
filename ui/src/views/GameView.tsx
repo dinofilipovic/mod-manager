@@ -648,6 +648,34 @@ export function GameView({
             const next = await run(pinned ? "Pinning" : "Unpinning", () => api.setModPinned(id, selectedMod.mod.id, pinned));
             if (next) setLoadout(next);
           }}
+          onReinstall={async (revision, changeOptions) => {
+            const result = await run(changeOptions ? "Opening installer" : "Reinstalling", () =>
+              api.reinstallMod(id, selectedMod.mod.id, revision, changeOptions),
+            );
+            if (result?.fomod) enqueueFomod(result.fomod);
+            if (result?.outcome) {
+              toast(
+                "success",
+                `${result.outcome.mod.name} reinstalled`,
+                result.outcome.replayed_choices
+                  ? "Same installer options as before. Apply changes to put it in the game."
+                  : "Apply changes to put it in the game.",
+              );
+              await reload();
+            }
+          }}
+          onRollback={async () => {
+            const result = await run("Rolling back", () => api.rollbackMod(id, selectedMod.mod.id));
+            if (result?.fomod) enqueueFomod(result.fomod);
+            if (result?.outcome) {
+              toast(
+                "success",
+                `${result.outcome.mod.name} rolled back${result.outcome.mod.version ? ` to ${result.outcome.mod.version}` : ""}`,
+                "Apply changes to put it in the game. Pin it to stop update alerts for this version.",
+              );
+              await reload();
+            }
+          }}
           onSkipUpdate={async () => {
             const next = await run("Skipping update", () => api.ignoreUpdate(id, selectedMod.mod.id, true));
             if (next) {

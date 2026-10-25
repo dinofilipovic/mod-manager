@@ -73,6 +73,8 @@ pub struct AppInfo {
 #[ts(export)]
 pub struct ArchivesInfo {
     pub retention: ArchiveRetention,
+    /// Revisions per mod whose archives are kept under `LastRevisions`.
+    pub revisions_kept: u32,
     #[ts(type = "number")]
     pub total_bytes: u64,
     pub unused_count: u32,
@@ -935,6 +937,7 @@ pub async fn finish_fomod(
             let done = mm_core::nexus::DownloadStatus::Done {
                 mod_id: outcome.record.id.clone(),
                 replaced_existing: outcome.replaced_existing,
+                replayed_choices: false,
                 warnings: outcome.warnings.clone(),
             };
             downloads::update(app, &download, |d| d.status = done);
@@ -961,12 +964,128 @@ pub async fn cancel_fomod(app: AppHandle, token: String) -> CommandResult<()> {
     .await
 }
 
+// Versions
+
+/// One revision of a mod, for its history.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct RevisionInfo {
+    pub revision: u32,
+    pub version: Option<String>,
+    #[ts(type = "number")]
+    pub installed_at: i64,
+    /// Its archive is kept, so it can be installed again.
+    pub archive_kept: bool,
+    /// It was installed with installer (FOMOD) choices.
+    pub has_choices: bool,
+    pub current: bool,
+}
+
+/// Either the mod was installed, or its installer waits for choices.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ReinstallResult {
+    pub outcome: Option<InstallOutcome>,
+    pub fomod: Option<FomodRequest>,
+}
+
+impl From<Prepared> for ReinstallResult {
+    fn from(p: Prepared) -> Self {
+        match p {
+            Prepared::Installed(outcome) => Self {
+                outcome: Some(outcome),
+                fomod: None,
+            },
+            Prepared::NeedsChoices(request) => Self {
+                outcome: None,
+                fomod: Some(request),
+            },
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn mod_revisions(app: AppHandle, mod_id: String) -> CommandResult<Vec<RevisionInfo>> {
+    blocking(app, move |_, state| {
+        let library = lock(&state.library);
+        let archives: std::collections::HashSet<i64> = library
+            .archive_usage()
+            .map_err(err)?
+            .into_iter()
+            .map(|a| a.archive.id)
+            .collect();
+        let revisions = library.revisions(&mod_id).map_err(err)?;
+        let current = revisions.first().map(|r| r.revision);
+        Ok(revisions
+            .into_iter()
+            .map(|r| RevisionInfo {
+                current: Some(r.revision) == current,
+                revision: r.revision,
+                version: r.version,
+                installed_at: r.installed_at,
+                archive_kept: r.archive_id.is_some_and(|id| archives.contains(&id)),
+                has_choices: r.fomod_choices.is_some(),
+            })
+            .collect())
+    })
+    .await
+}
+
+/// Installs a revision again from its archive with the same choices, or with
+/// the installer shown (`change_options`).
+#[tauri::command]
+pub async fn reinstall_mod(
+    app: AppHandle,
+    instance_id: String,
+    mod_id: String,
+    revision: u32,
+    change_options: bool,
+) -> CommandResult<ReinstallResult> {
+    blocking(app, move |app, state| {
+        let (_, game, _) = state.resolve(&instance_id)?;
+        let prepared = lock(&state.library)
+            .reinstall(game, &mod_id, revision, Some(&instance_id), change_options)
+            .map_err(err)?;
+        let _ = app.emit(LIBRARY_CHANGED, ());
+        Ok(prepared.into())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn rollback_mod(
+    app: AppHandle,
+    instance_id: String,
+    mod_id: String,
+) -> CommandResult<ReinstallResult> {
+    blocking(app, move |app, state| {
+        let (_, game, _) = state.resolve(&instance_id)?;
+        let prepared = lock(&state.library)
+            .rollback(game, &mod_id, Some(&instance_id))
+            .map_err(err)?;
+        let _ = app.emit(LIBRARY_CHANGED, ());
+        Ok(prepared.into())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_revisions_kept(app: AppHandle, count: u32) -> CommandResult<ArchivesInfo> {
+    blocking(app, move |_, state| {
+        let library = lock(&state.library);
+        library.set_revisions_kept(count).map_err(err)?;
+        archives_info_of(&library)
+    })
+    .await
+}
+
 // Archive store
 
 fn archives_info_of(library: &mm_core::library::Library) -> CommandResult<ArchivesInfo> {
     let usage = library.archive_usage().map_err(err)?;
     Ok(ArchivesInfo {
         retention: library.archive_retention(),
+        revisions_kept: library.revisions_kept(),
         total_bytes: usage.iter().map(|u| u.archive.size).sum(),
         unused_count: usage.iter().filter(|u| u.unused).count() as u32,
         unused_bytes: usage

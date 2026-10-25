@@ -314,6 +314,8 @@ pub enum DownloadStatus {
     Done {
         mod_id: String,
         replaced_existing: bool,
+        /// The installer's options were chosen like last time, without asking.
+        replayed_choices: bool,
         warnings: Vec<String>,
     },
     Failed {

@@ -3,6 +3,7 @@ import { api, errorMessage, nexusUrls, openExternal } from "../api";
 import type { LoadoutMod } from "../bindings/LoadoutMod";
 import type { NexusStatus } from "../bindings/NexusStatus";
 import type { ModChangelog } from "../bindings/ModChangelog";
+import type { RevisionInfo } from "../bindings/RevisionInfo";
 import { Icon } from "../components/Icon";
 import { KIND_LABELS, formatBytes, plural, timeAgo } from "../format";
 
@@ -19,6 +20,8 @@ export function ModDetails({
   onUpdate,
   onPin,
   onSkipUpdate,
+  onReinstall,
+  onRollback,
   onIdentify,
   onEnableMod,
 }: {
@@ -34,6 +37,8 @@ export function ModDetails({
   onUpdate: () => void;
   onPin: (pinned: boolean) => void;
   onSkipUpdate: () => void;
+  onReinstall: (revision: number, changeOptions: boolean) => Promise<void>;
+  onRollback: () => Promise<void>;
   onIdentify: () => Promise<void>;
   onEnableMod: (modId: string) => void;
 }) {
@@ -45,11 +50,27 @@ export function ModDetails({
     { state: "hidden" } | { state: "loading" } | { state: "shown"; log: ModChangelog } | { state: "error"; message: string }
   >({ state: "hidden" });
 
+  const [revisions, setRevisions] = useState<RevisionInfo[] | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
+
   useEffect(() => {
     setFiles(null);
     setShowFiles(false);
     setChangelog({ state: "hidden" });
+    setRevisions(null);
+    api.modRevisions(m.id).then(setRevisions, () => setRevisions([]));
   }, [m.id, m.revision]);
+
+  const versionAction = async (work: () => Promise<void>) => {
+    setHistoryBusy(true);
+    try {
+      await work();
+    } finally {
+      setHistoryBusy(false);
+    }
+  };
+  const current = revisions?.find((r) => r.current);
+  const canRollBack = revisions?.some((r) => !r.current && r.archive_kept) ?? false;
 
   const loadChangelog = async (refresh = false) => {
     setChangelog({ state: "loading" });
@@ -249,6 +270,49 @@ export function ModDetails({
           </>
         )}
       </dl>
+
+      {revisions && revisions.length > 0 && (
+        <section className="history" aria-busy={historyBusy}>
+          <h3>Versions</h3>
+          <ul>
+            {revisions.slice(0, 6).map((r) => (
+              <li key={r.revision} className={r.current ? "current" : undefined}>
+                <span>
+                  {r.version ? `v${r.version}` : `Revision ${r.revision}`}
+                  {r.current && <span className="badge">Installed</span>}
+                  <span className="muted small"> · {timeAgo(r.installed_at)}</span>
+                </span>
+                {!r.archive_kept ? (
+                  <span className="muted small" title="Its archive was deleted (Mod archives in Settings)">
+                    Archive not kept
+                  </span>
+                ) : r.current ? null : (
+                  <button className="link-button" disabled={historyBusy} onClick={() => versionAction(() => onReinstall(r.revision, false))}>
+                    Install this version
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+          <div className="row">
+            {canRollBack && (
+              <button disabled={historyBusy} onClick={() => versionAction(onRollback)}>
+                <Icon name="undo" /> Roll back
+              </button>
+            )}
+            {current?.archive_kept && (
+              <button disabled={historyBusy} onClick={() => versionAction(() => onReinstall(current.revision, false))}>
+                <Icon name="refresh" /> Reinstall
+              </button>
+            )}
+            {current?.archive_kept && current.has_choices && (
+              <button disabled={historyBusy} onClick={() => versionAction(() => onReinstall(current.revision, true))}>
+                Change options
+              </button>
+            )}
+          </div>
+        </section>
+      )}
 
       <button className="link-button" onClick={() => setShowFiles(!showFiles)}>
         <Icon name="chevron" size={12} className={showFiles ? "rot90" : undefined} /> {showFiles ? "Hide" : "Show"} files

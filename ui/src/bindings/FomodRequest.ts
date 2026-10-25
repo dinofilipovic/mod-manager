@@ -5,4 +5,8 @@ import type { Selections } from "./Selections";
 /**
  * A FOMOD installer waiting for the user's choices.
  */
-export type FomodRequest = { token: string, game_id: string, mod_name: string, installer: FomodInstaller, defaults: Selections, };
+export type FomodRequest = { token: string, game_id: string, mod_name: string, installer: FomodInstaller, defaults: Selections, 
+/**
+ * `defaults` hold the choices made last time (where they still fit).
+ */
+preselected: boolean, };

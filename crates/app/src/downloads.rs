@@ -180,6 +180,7 @@ fn run(
         nexus_file_id: Some(request.file_id),
         replaces,
         archive_id: Some(stored.id),
+        ..Default::default()
     };
     let prepared = library
         .prepare_archive(game, &dest, meta, instance_id.as_deref())
@@ -188,6 +189,7 @@ fn run(
         Prepared::Installed(outcome) => Ok(DownloadStatus::Done {
             mod_id: outcome.record.id,
             replaced_existing: outcome.replaced_existing,
+            replayed_choices: outcome.replayed_choices,
             warnings: outcome.warnings,
         }),
         Prepared::NeedsChoices(request) => {

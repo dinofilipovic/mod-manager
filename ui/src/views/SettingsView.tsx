@@ -273,14 +273,31 @@ export function SettingsView({
         <label className="field-row">
           <span>Keep</span>
           <select
-            value={archives?.retention ?? "LastTwo"}
+            value={archives?.retention ?? "LastRevisions"}
             disabled={!archives || archiveBusy !== null}
             onChange={(e) => void setRetention(e.target.value as ArchiveRetention)}
           >
             <option value="KeepAll">All archives</option>
-            <option value="LastTwo">The last 2 per mod (enough to roll back)</option>
+            <option value="LastRevisions">The last versions of each mod</option>
             <option value="DeleteAfterInstall">None: delete after installing</option>
           </select>
+          {archives?.retention === "LastRevisions" && (
+            <input
+              type="number"
+              className="narrow"
+              min={1}
+              max={20}
+              value={archives.revisions_kept}
+              disabled={archiveBusy !== null}
+              aria-label="Versions kept per mod"
+              onChange={(e) => {
+                const count = Number(e.target.value);
+                if (count >= 1 && count <= 20)
+                  void archiveAction("retention", async () => setArchives(await api.setRevisionsKept(count)));
+              }}
+            />
+          )}
+          {archives?.retention === "LastRevisions" && <span className="muted small">per mod; 2 lets you roll back once</span>}
         </label>
         {archiveError && (
           <div className="notice notice-error" role="alert">

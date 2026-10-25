@@ -24,6 +24,7 @@ const PATHS: Record<string, string> = {
   link: "M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1",
   sparkle: "M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5L18 18M6 18l2.5-2.5M15.5 8.5L18 6",
   more: "M5 12h.01M12 12h.01M19 12h.01",
+  undo: "M9 14L4 9l5-5M4 9h10a6 6 0 010 12h-3",
 };
 
 export type IconName = keyof typeof PATHS;

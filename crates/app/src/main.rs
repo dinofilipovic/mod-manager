@@ -125,6 +125,10 @@ fn main() {
             commands::archives_info,
             commands::set_archive_retention,
             commands::clean_unused_archives,
+            commands::mod_revisions,
+            commands::reinstall_mod,
+            commands::rollback_mod,
+            commands::set_revisions_kept,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start the app");

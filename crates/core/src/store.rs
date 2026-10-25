@@ -161,6 +161,7 @@ CREATE TABLE mod_revisions (
     archive_id INTEGER REFERENCES archives(id) ON DELETE SET NULL,
     fomod_choices TEXT,
     version TEXT,
+    nexus_file_id INTEGER,
     installed_at INTEGER NOT NULL,
     PRIMARY KEY (mod_id, revision)
 );
@@ -304,8 +305,10 @@ pub struct ModRevision {
     /// `None` once the archive was deleted (retention or cleanup).
     #[ts(type = "number | null")]
     pub archive_id: Option<i64>,
-    pub fomod_choices: Option<crate::fomod::Selections>,
+    pub fomod_choices: Option<crate::fomod::FomodChoices>,
     pub version: Option<String>,
+    /// The Nexus file this revision was, so rolling back restores it.
+    pub nexus_file_id: Option<u32>,
     #[ts(type = "number")]
     pub installed_at: i64,
 }
@@ -987,10 +990,11 @@ impl Store {
 
     pub fn insert_revision(&self, r: &ModRevision) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO mod_revisions (mod_id, revision, archive_id, fomod_choices, version, installed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO mod_revisions (mod_id, revision, archive_id, fomod_choices, version, installed_at,
+                nexus_file_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(mod_id, revision) DO UPDATE SET archive_id = ?3, fomod_choices = ?4,
-                version = ?5, installed_at = ?6",
+                version = ?5, installed_at = ?6, nexus_file_id = ?7",
             params![
                 r.mod_id,
                 r.revision,
@@ -999,7 +1003,8 @@ impl Store {
                     .as_ref()
                     .and_then(|c| serde_json::to_string(c).ok()),
                 r.version,
-                r.installed_at
+                r.installed_at,
+                r.nexus_file_id
             ],
         )?;
         Ok(())
@@ -1008,7 +1013,7 @@ impl Store {
     /// A mod's revisions, newest first.
     pub fn revisions(&self, mod_id: &str) -> Result<Vec<ModRevision>> {
         let mut stmt = self.conn.prepare(
-            "SELECT mod_id, revision, archive_id, fomod_choices, version, installed_at
+            "SELECT mod_id, revision, archive_id, fomod_choices, version, installed_at, nexus_file_id
              FROM mod_revisions WHERE mod_id = ?1 ORDER BY revision DESC",
         )?;
         let rows = stmt.query_map([mod_id], row_to_revision)?;
@@ -1018,7 +1023,7 @@ impl Store {
     /// Every revision of every mod (for working out which archives are used).
     pub fn all_revisions(&self) -> Result<Vec<ModRevision>> {
         let mut stmt = self.conn.prepare(
-            "SELECT mod_id, revision, archive_id, fomod_choices, version, installed_at
+            "SELECT mod_id, revision, archive_id, fomod_choices, version, installed_at, nexus_file_id
              FROM mod_revisions ORDER BY mod_id, revision DESC",
         )?;
         let rows = stmt.query_map([], row_to_revision)?;
@@ -1072,6 +1077,7 @@ fn row_to_revision(r: &rusqlite::Row) -> rusqlite::Result<ModRevision> {
         fomod_choices: choices.and_then(|c| serde_json::from_str(&c).ok()),
         version: r.get(4)?,
         installed_at: r.get(5)?,
+        nexus_file_id: r.get(6)?,
     })
 }
 

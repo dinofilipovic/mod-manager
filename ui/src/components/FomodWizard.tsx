@@ -120,6 +120,11 @@ export function FomodWizard({
             {[info?.version && `v${info.version}`, info?.author && `by ${info.author}`].filter(Boolean).join(" · ") ||
               "Installer options"}
           </p>
+          {request.preselected && (
+            <p className="small preselected-note">
+              <Icon name="check" size={12} /> Your choices from last time are preselected where they still fit.
+            </p>
+          )}
         </div>
         {visible.length > 1 && (
           <ol className="fomod-steps">

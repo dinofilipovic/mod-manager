@@ -54,6 +54,11 @@ pub struct ModMeta {
     pub replaces: Option<String>,
     /// The archive, when it is already in the archive store.
     pub archive_id: Option<i64>,
+    /// Installer choices to apply again (a reinstall); for an update they
+    /// come from the replaced mod's latest revision.
+    pub fomod_choices: Option<fomod::FomodChoices>,
+    /// Show the installer even when the earlier choices still fit.
+    pub ask_choices: bool,
 }
 
 impl From<NexusMatch> for ModMeta {
@@ -68,6 +73,8 @@ impl From<NexusMatch> for ModMeta {
             nexus_file_id: m.file_id,
             replaces: None,
             archive_id: None,
+            fomod_choices: None,
+            ask_choices: false,
         }
     }
 }
@@ -82,6 +89,8 @@ pub struct InstallOutcome {
     pub warnings: Vec<String>,
     /// True when an installed mod was updated in place.
     pub replaced_existing: bool,
+    /// The installer's options were chosen like last time, without asking.
+    pub replayed_choices: bool,
 }
 
 /// One install's mod list in its active profile, ready to display.
@@ -205,6 +214,7 @@ struct PendingFomod {
     instance_id: Option<String>,
 }
 
+#[derive(Debug)]
 pub enum Prepared {
     Installed(InstallOutcome),
     NeedsChoices(FomodRequest),
@@ -219,6 +229,8 @@ pub struct FomodRequest {
     pub mod_name: String,
     pub installer: fomod::FomodInstaller,
     pub defaults: fomod::Selections,
+    /// `defaults` hold the choices made last time (where they still fit).
+    pub preselected: bool,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -378,9 +390,11 @@ impl Library {
             Prepared::Installed(outcome) => Ok(outcome),
             Prepared::NeedsChoices(request) => {
                 let mut outcome = self.finish_fomod(game, &request.token, &request.defaults)?;
-                outcome
-                    .warnings
-                    .push("This mod has installer options; the default ones were used.".into());
+                outcome.warnings.push(if request.preselected {
+                    "The installer changed: your earlier choices were used where they still fit, defaults elsewhere.".into()
+                } else {
+                    "This mod has installer options; the default ones were used.".into()
+                });
                 Ok(outcome)
             }
         }
@@ -398,10 +412,11 @@ impl Library {
     ) -> Result<Prepared> {
         let token = uuid::Uuid::new_v4().to_string();
         let scratch = self.root.join("tmp").join(&token);
-        let archive_name = archive_path
+        let mut archive_name = archive_path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned());
         // Keep a copy of the user's archive so the mod can be reinstalled.
+        let reused = meta.archive_id.is_some();
         let stored = match meta.archive_id {
             Some(id) => self.store.archive(id)?,
             None => None,
@@ -418,7 +433,20 @@ impl Library {
             )?,
         };
         meta.archive_id = Some(stored.id);
+        if reused && stored.original_name.is_some() {
+            archive_name = stored.original_name.clone();
+        }
         let archive_path = &self.root.join(&stored.path);
+        // An update installs with the options chosen for the version it replaces.
+        if meta.fomod_choices.is_none()
+            && let Some(replaced) = &meta.replaces
+        {
+            meta.fomod_choices = self
+                .store
+                .revisions(replaced)?
+                .into_iter()
+                .find_map(|r| r.fomod_choices);
+        }
         if let Some(parsed) = archive_name.as_deref().map(parse_archive_name) {
             meta.name = meta.name.or(Some(parsed.name));
             meta.version = meta.version.or(parsed.version);
@@ -427,6 +455,10 @@ impl Library {
         let result = (|| {
             archive::extract(archive_path, &scratch)?;
             if let Some((installer, content_root)) = fomod::find_installer(&scratch)? {
+                let replay = meta
+                    .fomod_choices
+                    .as_ref()
+                    .map(|choices| fomod::replay(&installer, choices));
                 let request = FomodRequest {
                     token: token.clone(),
                     game_id: game.id.clone(),
@@ -434,7 +466,11 @@ impl Library {
                         .name
                         .clone()
                         .unwrap_or_else(|| installer.module_name.clone()),
-                    defaults: fomod::default_selections(&installer),
+                    defaults: replay.as_ref().map_or_else(
+                        || fomod::default_selections(&installer),
+                        |r| r.selections.clone(),
+                    ),
+                    preselected: replay.is_some(),
                     installer: installer.clone(),
                 };
                 self.pending.insert(
@@ -449,6 +485,12 @@ impl Library {
                         instance_id: instance_id.map(String::from),
                     },
                 );
+                // Same steps, groups and options as last time: no need to ask.
+                if replay.is_some_and(|r| r.complete) && !meta.ask_choices {
+                    let mut outcome = self.finish_fomod(game, &token, &request.defaults)?;
+                    outcome.replayed_choices = true;
+                    return Ok(Prepared::Installed(outcome));
+                }
                 return Ok(Prepared::NeedsChoices(request));
             }
             let name = meta.name.clone().unwrap_or_else(|| "Unnamed mod".into());
@@ -543,7 +585,7 @@ impl Library {
             pending.meta,
             pending.archive_name,
             pending.instance_id.as_deref(),
-            Some(selections.clone()),
+            Some(fomod::name_choices(&pending.installer, selections)),
         );
         let _ = fs::remove_dir_all(&pending.scratch);
         result
@@ -560,7 +602,11 @@ impl Library {
                 .name
                 .clone()
                 .unwrap_or_else(|| pending.installer.module_name.clone()),
-            defaults: fomod::default_selections(&pending.installer),
+            defaults: pending.meta.fomod_choices.as_ref().map_or_else(
+                || fomod::default_selections(&pending.installer),
+                |c| fomod::replay(&pending.installer, c).selections,
+            ),
+            preselected: pending.meta.fomod_choices.is_some(),
             installer: pending.installer.clone(),
         })
     }
@@ -586,7 +632,7 @@ impl Library {
         meta: ModMeta,
         archive_name: Option<String>,
         instance_id: Option<&str>,
-        fomod_choices: Option<fomod::Selections>,
+        fomod_choices: Option<fomod::FomodChoices>,
     ) -> Result<InstallOutcome> {
         let name = meta.name.clone().unwrap_or_else(|| "Unnamed mod".into());
 
@@ -640,11 +686,21 @@ impl Library {
             name: existing
                 .as_ref()
                 .map_or(name, |m| meta.name.clone().unwrap_or(m.name.clone())),
+            // The version is the archive's; other details not known for
+            // this archive stay as they were.
             version: meta.version,
-            author: meta.author,
-            summary: meta.summary,
-            picture_url: meta.picture_url,
-            nexus_mod_id: meta.nexus_mod_id,
+            author: meta
+                .author
+                .or_else(|| existing.as_ref().and_then(|m| m.author.clone())),
+            summary: meta
+                .summary
+                .or_else(|| existing.as_ref().and_then(|m| m.summary.clone())),
+            picture_url: meta
+                .picture_url
+                .or_else(|| existing.as_ref().and_then(|m| m.picture_url.clone())),
+            nexus_mod_id: meta
+                .nexus_mod_id
+                .or_else(|| existing.as_ref().and_then(|m| m.nexus_mod_id)),
             nexus_file_id: meta.nexus_file_id,
             archive_name,
             kinds: plan.kinds.clone(),
@@ -667,6 +723,7 @@ impl Library {
             archive_id,
             fomod_choices,
             version: record.version.clone(),
+            nexus_file_id: record.nexus_file_id,
             installed_at: record.installed_at,
         })?;
         self.apply_retention()?;
@@ -690,6 +747,7 @@ impl Library {
             skipped: plan.skipped,
             warnings: plan.warnings,
             replaced_existing: existing.is_some(),
+            replayed_choices: false,
         })
     }
 
@@ -853,6 +911,115 @@ impl Library {
             .set_changelog(game_domain, nexus_mod_id, now(), entries)
     }
 
+    // Reinstall, roll back, change options
+
+    /// Installs a revision of a mod again from its stored archive, with the
+    /// installer choices it had. With `change_options` the installer is
+    /// shown with those choices preselected. The result is a new revision.
+    pub fn reinstall(
+        &mut self,
+        game: &GameDefinition,
+        mod_id: &str,
+        revision: u32,
+        instance_id: Option<&str>,
+        change_options: bool,
+    ) -> Result<Prepared> {
+        let record = self
+            .store
+            .get_mod(mod_id)?
+            .ok_or_else(|| Error::NotFound(format!("mod {mod_id}")))?;
+        let rev = self
+            .store
+            .revisions(mod_id)?
+            .into_iter()
+            .find(|r| r.revision == revision)
+            .ok_or_else(|| Error::NotFound(format!("revision {revision} of {}", record.name)))?;
+        let archive = rev
+            .archive_id
+            .map(|id| self.store.archive(id))
+            .transpose()?
+            .flatten()
+            .filter(|a| self.root.join(&a.path).is_file())
+            .ok_or_else(|| {
+                Error::Install(format!(
+                    "The archive of {} {} is no longer kept (see Mod archives in Settings). Download that version from Nexus Mods again.",
+                    record.name,
+                    rev.version.as_deref().unwrap_or("")
+                ))
+            })?;
+        if change_options && rev.fomod_choices.is_none() {
+            return Err(Error::Install(format!(
+                "{} has no installer options to change.",
+                record.name
+            )));
+        }
+        let meta = ModMeta {
+            name: Some(record.name.clone()),
+            version: rev.version.clone(),
+            nexus_mod_id: record.nexus_mod_id,
+            nexus_file_id: rev.nexus_file_id.or(archive.nexus_file_id),
+            replaces: Some(record.id.clone()),
+            archive_id: Some(archive.id),
+            fomod_choices: rev.fomod_choices.clone(),
+            ask_choices: change_options,
+            ..Default::default()
+        };
+        let path = self.root.join(&archive.path);
+        self.prepare_archive(game, &path, meta, instance_id)
+    }
+
+    /// Goes back to the newest earlier revision whose archive is kept.
+    pub fn rollback(
+        &mut self,
+        game: &GameDefinition,
+        mod_id: &str,
+        instance_id: Option<&str>,
+    ) -> Result<Prepared> {
+        let record = self
+            .store
+            .get_mod(mod_id)?
+            .ok_or_else(|| Error::NotFound(format!("mod {mod_id}")))?;
+        // The revision installed now may itself be a reinstall of an older
+        // one; go back from the version it holds.
+        let revisions = self.store.revisions(mod_id)?;
+        let current_archive = revisions.first().and_then(|r| r.archive_id);
+        let target = revisions
+            .iter()
+            .skip(1)
+            .filter(|r| r.archive_id.is_some() && r.archive_id != current_archive)
+            .find(|r| {
+                r.archive_id
+                    .and_then(|id| self.store.archive(id).ok().flatten())
+                    .is_some_and(|a| self.root.join(&a.path).is_file())
+            })
+            .map(|r| r.revision)
+            .ok_or_else(|| {
+                Error::Install(format!(
+                    "No earlier version of {} is kept to roll back to.",
+                    record.name
+                ))
+            })?;
+        self.reinstall(game, mod_id, target, instance_id, false)
+    }
+
+    /// How many revisions per mod keep their archive under the
+    /// "last revisions" retention (default 2).
+    pub fn revisions_kept(&self) -> u32 {
+        self.store
+            .setting("revisions_kept")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2)
+    }
+
+    pub fn set_revisions_kept(&self, count: u32) -> Result<()> {
+        let count = count.clamp(1, 20);
+        self.store
+            .set_setting("revisions_kept", Some(&count.to_string()))?;
+        self.apply_retention()
+    }
+
     // Archive store
 
     /// Adds an archive to the archive store (or finds the stored copy with
@@ -909,7 +1076,7 @@ impl Library {
     fn apply_retention(&self) -> Result<()> {
         let keep = match self.archive_retention() {
             ArchiveRetention::KeepAll => return Ok(()),
-            ArchiveRetention::LastTwo => 2,
+            ArchiveRetention::LastRevisions => self.revisions_kept() as usize,
             ArchiveRetention::DeleteAfterInstall => 0,
         };
         let revisions = self.store.all_revisions()?;
@@ -2321,7 +2488,9 @@ mod tests {
             .finish_fomod(&f.game, &request.token, &choose_b)
             .unwrap();
         let revision = &f.lib.revisions(&outcome.record.id).unwrap()[0];
-        assert_eq!(revision.fomod_choices.as_ref(), Some(&choose_b));
+        let choices = revision.fomod_choices.as_ref().unwrap();
+        assert_eq!(choices.0[0].step, "S");
+        assert_eq!(choices.0[0].groups[0].options, ["B"]);
         assert!(revision.archive_id.is_some());
     }
 

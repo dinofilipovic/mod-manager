@@ -67,9 +67,10 @@ pub struct ArchiveRecord {
 #[ts(export)]
 pub enum ArchiveRetention {
     KeepAll,
-    /// The archives of each mod's two latest revisions (enough to roll back once).
+    /// The archives of each mod's latest revisions (how many is a setting,
+    /// 2 by default: enough to roll back once).
     #[default]
-    LastTwo,
+    LastRevisions,
     /// Deleted once installed; reinstalling or rolling back needs a new download.
     DeleteAfterInstall,
 }
@@ -78,7 +79,7 @@ impl ArchiveRetention {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::KeepAll => "all",
-            Self::LastTwo => "last2",
+            Self::LastRevisions => "last",
             Self::DeleteAfterInstall => "none",
         }
     }
@@ -87,7 +88,7 @@ impl ArchiveRetention {
         match s {
             Some("all") => Self::KeepAll,
             Some("none") => Self::DeleteAfterInstall,
-            _ => Self::LastTwo,
+            _ => Self::LastRevisions,
         }
     }
 }

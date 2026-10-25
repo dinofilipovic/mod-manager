@@ -7,7 +7,7 @@ use anyhow::Result;
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use mm_core::env::{self, crossover};
-use mm_core::library::{Library, ModMeta};
+use mm_core::library::{Library, ModMeta, Prepared};
 use mm_core::requirements::FrameworkState;
 use mm_core::{Environment, EnvironmentKind, GameDefinition, GameInstance, ScanResult, game};
 
@@ -62,6 +62,25 @@ enum Command {
     },
     /// Remove all deployed mod files and restore replaced game files.
     Purge {
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// Go back to the previous kept version of a mod.
+    Rollback {
+        /// Mod id (see `mm mods --json`).
+        #[arg(long = "mod")]
+        mod_id: String,
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// Install a version of a mod again from its kept archive, with the same
+    /// installer choices.
+    Reinstall {
+        #[arg(long = "mod")]
+        mod_id: String,
+        /// Revision to install (default: the current one).
+        #[arg(long)]
+        revision: Option<u32>,
         #[arg(long)]
         instance: Option<String>,
     },
@@ -159,6 +178,33 @@ fn main() -> Result<()> {
             let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
             let report = open_library()?.deploy(&game, &instance)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::Rollback { mod_id, instance } => {
+            let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
+            let mut library = open_library()?;
+            let prepared = library.rollback(&game, &mod_id, Some(&instance.id))?;
+            report_prepared(&mut library, &game, prepared, cli.json)?;
+        }
+        Command::Reinstall {
+            mod_id,
+            revision,
+            instance,
+        } => {
+            let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
+            let mut library = open_library()?;
+            let revision = match revision {
+                Some(r) => r,
+                None => library
+                    .revisions(&mod_id)?
+                    .first()
+                    .map(|r| r.revision)
+                    .context(
+                        "this mod has no recorded versions; install it again from its archive",
+                    )?,
+            };
+            let prepared =
+                library.reinstall(&game, &mod_id, revision, Some(&instance.id), false)?;
+            report_prepared(&mut library, &game, prepared, cli.json)?;
         }
         Command::Verify { instance } => {
             let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
@@ -259,6 +305,46 @@ fn print_health(loadout: &mm_core::library::Loadout, logs: &[mm_core::health::Lo
             println!("      line {}{who}: {}", e.line, e.text);
         }
     }
+}
+
+/// Prints an install result. Without someone to ask, a changed installer
+/// is finished with the preselected (earlier, else default) choices.
+fn report_prepared(
+    library: &mut Library,
+    game: &GameDefinition,
+    prepared: Prepared,
+    json: bool,
+) -> Result<()> {
+    let outcome = match prepared {
+        Prepared::Installed(outcome) => outcome,
+        Prepared::NeedsChoices(request) => {
+            let mut outcome = library.finish_fomod(game, &request.token, &request.defaults)?;
+            outcome.warnings.push(
+                "The installer changed; earlier choices were used where they still fit.".into(),
+            );
+            outcome
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+    } else {
+        println!(
+            "{} is now revision {} ({} files){}",
+            outcome.record.name,
+            outcome.record.revision,
+            outcome.record.file_count,
+            if outcome.replayed_choices {
+                ", installer choices as before"
+            } else {
+                ""
+            }
+        );
+        for warning in &outcome.warnings {
+            println!("    warning: {warning}");
+        }
+        println!("Run `mm deploy` to put it in the game.");
+    }
+    Ok(())
 }
 
 fn open_library() -> Result<Library> {

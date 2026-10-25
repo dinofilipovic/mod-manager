@@ -3,4 +3,4 @@
 /**
  * How many archives to keep.
  */
-export type ArchiveRetention = "KeepAll" | "LastTwo" | "DeleteAfterInstall";
+export type ArchiveRetention = "KeepAll" | "LastRevisions" | "DeleteAfterInstall";

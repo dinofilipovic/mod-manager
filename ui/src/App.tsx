@@ -75,7 +75,10 @@ export function App() {
           toast(
             "success",
             d.status.replaced_existing ? `${d.name} updated` : `${d.name} installed`,
-            d.status.warnings[0] ?? "Apply changes to put it in the game.",
+            d.status.warnings[0] ??
+              (d.status.replayed_choices
+                ? "Installed with the same installer options as before. Apply changes to put it in the game."
+                : "Apply changes to put it in the game."),
           );
         if (d.status.state === "Failed") toast("error", `${d.name} failed`, d.status.message);
       }

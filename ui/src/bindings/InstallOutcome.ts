@@ -5,4 +5,8 @@ export type InstallOutcome = { mod: ModRecord, skipped: Array<string>, warnings:
 /**
  * True when an installed mod was updated in place.
  */
-replaced_existing: boolean, };
+replaced_existing: boolean, 
+/**
+ * The installer's options were chosen like last time, without asking.
+ */
+replayed_choices: boolean, };
