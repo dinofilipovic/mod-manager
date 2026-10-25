@@ -343,12 +343,15 @@ export function installDevMock() {
         case "set_revisions_kept":
           revisionsKept = a.count as number;
           return archivesInfo();
-        case "mod_revisions":
+        case "mod_revisions": {
+          const m = mods.find((x) => x.mod.id === a.modId)?.mod;
+          const v = m?.version ?? "1.0";
           return [
-            { revision: 3, version: "1.38.0", installed_at: now - 3600, archive_kept: true, has_choices: true, current: true },
-            { revision: 2, version: "1.37.1", installed_at: now - 86400 * 20, archive_kept: true, has_choices: true, current: false },
-            { revision: 1, version: "1.37.0", installed_at: now - 86400 * 45, archive_kept: false, has_choices: true, current: false },
+            { revision: 3, version: v, installed_at: m?.installed_at ?? now, archive_kept: true, has_choices: true, current: true },
+            { revision: 2, version: `${v}-beta`, installed_at: now - 86400 * 20, archive_kept: true, has_choices: true, current: false },
+            { revision: 1, version: null, installed_at: now - 86400 * 45, archive_kept: false, has_choices: false, current: false },
           ];
+        }
         case "reinstall_mod":
         case "rollback_mod":
           return { outcome: { mod: mods[0].mod, skipped: [], warnings: [], replaced_existing: true, replayed_choices: true }, fomod: null };
