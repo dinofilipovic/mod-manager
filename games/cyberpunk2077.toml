@@ -1,0 +1,102 @@
+# Cyberpunk 2077 game definition.
+#
+# Everything game-specific lives here, not in code. Paths in `known_install_paths`
+# are Windows paths and get resolved inside each environment (bottle/prefix).
+
+id = "cyberpunk2077"
+name = "Cyberpunk 2077"
+# Relative to the install folder; used to confirm a folder really is the game.
+executable = "bin/x64/Cyberpunk2077.exe"
+
+# Fallback locations checked when no store metadata points at the game.
+known_install_paths = [
+  'C:\GOG Games\Cyberpunk 2077',
+  'C:\Program Files (x86)\GOG Galaxy\Games\Cyberpunk 2077',
+  'C:\Program Files\Epic Games\Cyberpunk2077',
+  'C:\Program Files\Epic Games\Cyberpunk 2077',
+]
+
+# Folder names the game expects in lowercase. Mods packed on Windows often use
+# other casing, which breaks on case-sensitive filesystems (Linux, some bottles).
+canonical_dirs = [
+  "archive", "pc", "mod", "bin", "x64", "plugins", "cyber_engine_tweaks", "mods",
+  "r6", "scripts", "tweaks", "red4ext", "engine", "config", "tools", "redmod",
+]
+
+# Top-level folders of the game. An archive containing any of these is laid out
+# from the game root and installed as-is.
+root_markers = ["archive", "bin", "r6", "red4ext", "mods", "engine", "tools"]
+
+# Top-level keys must come before the first [table] below, or TOML puts them
+# inside that table.
+[stores]
+steam_app_id = "1091500"
+gog_id = "1423049311"
+nexus_domain = "cyberpunk2077"
+
+# Where each kind of mod file is deployed, relative to the install folder.
+[[layout]]
+kind = "archive"
+path = "archive/pc/mod"
+extensions = ["archive", "xl"]
+flatten = true
+description = "Archive mods (.archive) and ArchiveXL definitions (.xl)"
+
+[[layout]]
+kind = "redscript"
+path = "r6/scripts"
+extensions = ["reds"]
+per_mod_folder = true
+description = "redscript mods"
+
+[[layout]]
+kind = "tweak"
+path = "r6/tweaks"
+extensions = ["yaml", "yml", "tweak"]
+per_mod_folder = true
+description = "TweakXL tweaks"
+
+[[layout]]
+kind = "cet"
+path = "bin/x64/plugins/cyber_engine_tweaks/mods"
+marker_file = "init.lua"
+description = "Cyber Engine Tweaks Lua mods"
+
+[[layout]]
+kind = "red4ext"
+path = "red4ext/plugins"
+extensions = ["dll"]
+per_mod_folder = true
+description = "RED4ext plugins"
+
+# The script extenders' own folders, so they are recognised by type. They have
+# no extensions or marker, so loose files are never routed here.
+[[layout]]
+kind = "cet"
+path = "bin/x64/plugins/cyber_engine_tweaks"
+description = "Cyber Engine Tweaks itself"
+
+[[layout]]
+kind = "red4ext"
+path = "red4ext"
+description = "RED4ext itself"
+
+[[layout]]
+kind = "redmod"
+path = "mods"
+marker_file = "info.json"
+description = "REDmod mods (mods/<name>/info.json), need the -modded launch argument"
+
+# DLL loaders that Wine must load from the game folder instead of its built-ins.
+[[wine.dll_overrides]]
+dll = "version"
+mode = "native,builtin"
+reason = "Cyber Engine Tweaks loads through version.dll"
+
+[[wine.dll_overrides]]
+dll = "winmm"
+mode = "native,builtin"
+reason = "RED4ext loads through winmm.dll"
+
+[launch]
+modded_args = ["-modded"]

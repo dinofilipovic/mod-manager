@@ -1,0 +1,550 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import type { View } from "../App";
+import { ARCHIVE_EXTENSIONS, api, errorMessage, events, nexusUrls, openExternal, pickArchives, reveal } from "../api";
+import type { DeployReport } from "../bindings/DeployReport";
+import type { Environment } from "../bindings/Environment";
+import type { GameDefinition } from "../bindings/GameDefinition";
+import type { GameInstance } from "../bindings/GameInstance";
+import type { Loadout } from "../bindings/Loadout";
+import type { NexusStatus } from "../bindings/NexusStatus";
+import type { ScanResult } from "../bindings/ScanResult";
+import { ConfirmDialog, PromptDialog } from "../components/Dialog";
+import { Icon } from "../components/Icon";
+import { useToast } from "../components/Toasts";
+import { KIND_LABELS, STORE_LABELS, plural, timeAgo } from "../format";
+import { ModDetails } from "./ModDetails";
+import { ModList } from "./ModList";
+
+type DialogState =
+  | { kind: "new-profile" }
+  | { kind: "rename-profile" }
+  | { kind: "delete-profile" }
+  | { kind: "purge" }
+  | { kind: "remove-mod"; modId: string; name: string }
+  | { kind: "rename-mod"; modId: string; name: string }
+  | null;
+
+function describeReport(r: DeployReport): string {
+  const parts = [
+    r.added && `${r.added} added`,
+    r.replaced && `${r.replaced} replaced`,
+    r.removed && `${r.removed} removed`,
+    r.restored && `${r.restored} originals restored`,
+  ].filter(Boolean);
+  return parts.length ? `${parts.join(", ")}.` : "Nothing to change.";
+}
+
+export function GameView({
+  instance,
+  env,
+  game,
+  nexus,
+  onScan,
+  onNavigate,
+}: {
+  instance: GameInstance;
+  env: Environment;
+  game: GameDefinition;
+  nexus: NexusStatus | null;
+  onScan: (scan: ScanResult) => void;
+  onNavigate: (view: View) => void;
+}) {
+  const toast = useToast();
+  const [loadout, setLoadout] = useState<Loadout | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [kindFilter, setKindFilter] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<DialogState>(null);
+  const [dropping, setDropping] = useState(false);
+  const [copyProfile, setCopyProfile] = useState(true);
+
+  const id = instance.id;
+  const reload = useCallback(async () => {
+    try {
+      setLoadout(await api.loadout(id));
+    } catch (e) {
+      toast("error", "Couldn't load mods", errorMessage(e));
+    }
+  }, [id, toast]);
+
+  useEffect(() => {
+    void reload();
+    const unlisten = events.libraryChanged(() => void reload());
+    return () => void unlisten.then((f) => f());
+  }, [reload]);
+
+  /** Runs an action that returns a new loadout, with a busy state and error toast. */
+  const run = useCallback(
+    async <T,>(label: string, action: () => Promise<T>): Promise<T | undefined> => {
+      setBusy(label);
+      try {
+        return await action();
+      } catch (e) {
+        toast("error", `${label} failed`, errorMessage(e));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [toast],
+  );
+
+  const install = useCallback(
+    async (paths: string[]) => {
+      const archives = paths.filter((p) => ARCHIVE_EXTENSIONS.some((ext) => p.toLowerCase().endsWith(`.${ext}`)));
+      if (archives.length === 0) {
+        if (paths.length) toast("error", "Not a mod archive", "Drop .zip, .7z or .rar files.");
+        return;
+      }
+      const results = await run("Installing", () => api.importArchives(id, archives));
+      if (!results) return;
+      const ok = results.filter((r) => r.outcome);
+      const failed = results.filter((r) => r.error);
+      if (ok.length)
+        toast(
+          "success",
+          ok.length === 1 ? `${ok[0].outcome!.mod.name} installed` : `${ok.length} mods installed`,
+          ok.flatMap((r) => r.outcome!.warnings)[0] ??
+            (ok.some((r) => r.outcome!.mod.nexus_file_id)
+              ? "Matched on Nexus Mods, so you'll get update alerts. Apply changes to put it in the game."
+              : "Apply changes to put them in the game."),
+        );
+      for (const f of failed) toast("error", `Couldn't install ${f.file}`, f.error ?? undefined);
+      await reload();
+    },
+    [id, reload, run, toast],
+  );
+
+  // Files dragged onto the window.
+  useEffect(() => {
+    const unlisten = getCurrentWebview().onDragDropEvent((event) => {
+      const p = event.payload;
+      if (p.type === "enter" || p.type === "over") setDropping(true);
+      else if (p.type === "leave") setDropping(false);
+      else if (p.type === "drop") {
+        setDropping(false);
+        void install(p.paths);
+      }
+    });
+    return () => void unlisten.then((f) => f());
+  }, [install]);
+
+  const apply = async () => {
+    const report = await run("Applying", () => api.deploy(id));
+    if (report) {
+      toast("success", "Game folder updated", describeReport(report));
+      await reload();
+    }
+    return report;
+  };
+
+  const play = async () => {
+    if (loadout?.pending_changes && !(await apply())) return;
+    const launched = await run("Launching", async () => {
+      await api.launchGame(id, true);
+      return true;
+    });
+    if (launched) toast("info", `Starting ${game.name}`, "This can take a moment in CrossOver.");
+  };
+
+  const fixDlls = async () => {
+    const scan = await run("Fixing Wine settings", () => api.fixDllOverrides(id));
+    if (scan) {
+      onScan(scan);
+      toast("success", "Wine DLL overrides set", "Script extenders will load next time the game starts.");
+    }
+  };
+
+  const checkUpdates = async () => {
+    const next = await run("Checking for updates", () => api.checkUpdates(id));
+    if (next) {
+      setLoadout(next);
+      const count = next.mods.filter((m) => m.mod.update_file_id).length;
+      toast(count ? "info" : "success", count ? `${plural(count, "update")} available` : "All mods are up to date");
+    }
+  };
+
+  const mods = useMemo(() => loadout?.mods ?? [], [loadout]);
+  const kinds = useMemo(() => [...new Set(mods.flatMap((m) => m.mod.kinds))].sort(), [mods]);
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return mods.filter(
+      (m) =>
+        (!kindFilter || m.mod.kinds.includes(kindFilter)) &&
+        (!q || m.mod.name.toLowerCase().includes(q) || m.mod.author?.toLowerCase().includes(q)),
+    );
+  }, [mods, query, kindFilter]);
+
+  const missingDlls = instance.dll_overrides.filter((d) => !d.satisfied);
+  const enabledCount = mods.filter((m) => m.enabled).length;
+  const activeProfile = loadout?.profiles.find((p) => p.id === loadout.active_profile_id);
+  const selectedMod = mods.find((m) => m.mod.id === selected) ?? null;
+  const domain = game.stores.nexus_domain;
+  const envLabel = env.kind.type === "CrossOverBottle" ? `CrossOver · ${env.name}` : `Wine · ${env.name}`;
+
+  return (
+    <div className={`game-view${selectedMod ? " with-details" : ""}`}>
+      <div className="game-main">
+        <header className="game-header">
+          <div className="game-title">
+            <h1>{game.name}</h1>
+            <div className="chips">
+              <span className="chip">
+                <Icon name="wine" size={12} /> {envLabel}
+              </span>
+              <span className="chip">{STORE_LABELS[instance.store]}</span>
+              <button className="chip chip-button" onClick={() => reveal(instance.install_path)} title={instance.install_path}>
+                <Icon name="folder" size={12} /> Game folder
+              </button>
+            </div>
+          </div>
+          <div className="header-actions">
+            <details className="menu">
+              <summary className="icon-button" aria-label="More actions">
+                <Icon name="more" />
+              </summary>
+              <div className="menu-items">
+                <button onClick={() => reveal(instance.install_path)}>
+                  <Icon name="folder" /> Open game folder
+                </button>
+                {domain && (
+                  <button onClick={() => openExternal(nexusUrls.gameMods(domain))}>
+                    <Icon name="external" /> Browse mods on Nexus
+                  </button>
+                )}
+                <button onClick={checkUpdates} disabled={!nexus?.user}>
+                  <Icon name="refresh" /> Check for updates
+                </button>
+                <hr />
+                <button className="danger-text" onClick={() => setDialog({ kind: "purge" })}>
+                  <Icon name="trash" /> Remove all mods from game folder
+                </button>
+              </div>
+            </details>
+            <button className="play" onClick={play} disabled={!!busy}>
+              <Icon name="play" size={18} />
+              {busy === "Launching" ? "Starting…" : loadout?.pending_changes ? "Apply & Play" : "Play"}
+            </button>
+          </div>
+        </header>
+
+        {(missingDlls.length > 0 || !nexus?.user) && (
+          <section className="setup" aria-label="Setup">
+            {missingDlls.length > 0 && (
+              <div className="setup-item">
+                <Icon name="alert" className="warn-icon" />
+                <div>
+                  <strong>Wine needs two settings for script extenders</strong>
+                  <p>
+                    {missingDlls.map((d) => d.reason).join(". ")}. Without{" "}
+                    {missingDlls.map((d) => (
+                      <code key={d.dll}>{d.dll}</code>
+                    ))}{" "}
+                    set to <code>native,builtin</code> in this bottle, those mods silently don't load.
+                  </p>
+                </div>
+                <button className="primary" onClick={fixDlls} disabled={!!busy}>
+                  {busy === "Fixing Wine settings" ? "Fixing…" : "Fix automatically"}
+                </button>
+              </div>
+            )}
+            {!nexus?.user && (
+              <div className="setup-item">
+                <Icon name="link" className="info-icon" />
+                <div>
+                  <strong>Connect Nexus Mods</strong>
+                  <p>Install mods straight from the website's "Mod Manager Download" button and get update alerts.</p>
+                </div>
+                <button onClick={() => onNavigate({ kind: "settings" })}>Connect</button>
+              </div>
+            )}
+          </section>
+        )}
+
+        <div className="toolbar">
+          <div className="profile-picker">
+            <Icon name="layers" />
+            <select
+              aria-label="Profile"
+              value={loadout?.active_profile_id ?? ""}
+              onChange={async (e) => {
+                if (e.target.value === "__new") return setDialog({ kind: "new-profile" });
+                const next = await run("Switching profile", () => api.switchProfile(id, e.target.value));
+                if (next) setLoadout(next);
+              }}
+            >
+              {loadout?.profiles.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+              <option value="__new">+ New profile…</option>
+            </select>
+            <details className="menu">
+              <summary className="icon-button" aria-label="Profile actions">
+                <Icon name="more" size={14} />
+              </summary>
+              <div className="menu-items">
+                <button onClick={() => setDialog({ kind: "new-profile" })}>
+                  <Icon name="plus" /> New profile
+                </button>
+                <button onClick={() => setDialog({ kind: "rename-profile" })}>Rename “{activeProfile?.name}”</button>
+                <button
+                  className="danger-text"
+                  disabled={(loadout?.profiles.length ?? 0) <= 1}
+                  onClick={() => setDialog({ kind: "delete-profile" })}
+                >
+                  <Icon name="trash" /> Delete profile
+                </button>
+              </div>
+            </details>
+          </div>
+
+          <label className="search">
+            <Icon name="search" />
+            <input placeholder="Search mods" value={query} onChange={(e) => setQuery(e.target.value)} />
+          </label>
+
+          <div className="toolbar-actions">
+            {nexus?.user && mods.length > 0 && (
+              <button onClick={checkUpdates} disabled={!!busy}>
+                <Icon name="refresh" className={busy === "Checking for updates" ? "spin" : undefined} /> Updates
+              </button>
+            )}
+            <button className="primary" onClick={async () => install(await pickArchives())} disabled={!!busy}>
+              <Icon name="plus" /> Add mods
+            </button>
+          </div>
+        </div>
+
+        {kinds.length > 1 && (
+          <div className="filters" role="group" aria-label="Filter by type">
+            <button className={!kindFilter ? "pill active" : "pill"} onClick={() => setKindFilter(null)}>
+              All <span>{mods.length}</span>
+            </button>
+            {kinds.map((k) => (
+              <button
+                key={k}
+                className={kindFilter === k ? "pill active" : "pill"}
+                onClick={() => setKindFilter(kindFilter === k ? null : k)}
+              >
+                {KIND_LABELS[k] ?? k} <span>{mods.filter((m) => m.mod.kinds.includes(k)).length}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {loadout && mods.length === 0 ? (
+          <div className="empty-mods">
+            <div className="drop-art">
+              <Icon name="download" size={32} />
+            </div>
+            <h2>No mods yet</h2>
+            <p>
+              Drag mod archives (.zip, .7z, .rar) here, or click <strong>Mod Manager Download</strong> on a Nexus mod
+              page and it lands here automatically.
+            </p>
+            <div className="row">
+              <button className="primary" onClick={async () => install(await pickArchives())}>
+                <Icon name="plus" /> Add mods
+              </button>
+              {domain && (
+                <button onClick={() => openExternal(nexusUrls.gameMods(domain))}>
+                  <Icon name="external" /> Browse Nexus Mods
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="list-caption">
+              <span>
+                {plural(enabledCount, "mod")} enabled of {mods.length}
+                {query || kindFilter ? ` · showing ${filtered.length}` : ""}
+              </span>
+              <span className="muted">Lower in the list wins when mods change the same file. Drag to reorder.</span>
+            </div>
+            <ModList
+              mods={filtered}
+              reorderable={!query && !kindFilter}
+              selectedId={selected}
+              onSelect={(modId) => setSelected(modId === selected ? null : modId)}
+              onToggle={async (modId, enabled) => {
+                const next = await run(enabled ? "Enabling" : "Disabling", () => api.setModEnabled(id, modId, enabled));
+                if (next) setLoadout(next);
+              }}
+              onReorder={async (order) => {
+                // Optimistic: show the new order immediately.
+                setLoadout((l) => l && { ...l, mods: order.map((oid) => l.mods.find((m) => m.mod.id === oid)!) });
+                const next = await run("Reordering", () => api.reorderMods(id, order));
+                if (next) setLoadout(next);
+                else void reload();
+              }}
+            />
+          </>
+        )}
+
+        {loadout?.pending_changes && (
+          <div className="apply-bar" role="status">
+            <Icon name="sparkle" />
+            <span>
+              <strong>Changes aren't in the game yet.</strong>{" "}
+              <span className="muted">Apply now, or they're applied when you press Play.</span>
+            </span>
+            <button className="primary" onClick={apply} disabled={!!busy}>
+              {busy === "Applying" ? "Applying…" : "Apply changes"}
+            </button>
+          </div>
+        )}
+        {loadout && !loadout.pending_changes && loadout.deployed_at && (
+          <p className="synced muted">
+            <Icon name="check" size={12} /> Game folder matches “{activeProfile?.name}” · applied {timeAgo(loadout.deployed_at)}
+          </p>
+        )}
+      </div>
+
+      {selectedMod && (
+        <ModDetails
+          entry={selectedMod}
+          index={mods.indexOf(selectedMod)}
+          total={mods.length}
+          gameDomain={domain ?? null}
+          nexus={nexus}
+          onClose={() => setSelected(null)}
+          onMove={async (delta) => {
+            const order = mods.map((m) => m.mod.id);
+            const from = order.indexOf(selectedMod.mod.id);
+            const to = Math.max(0, Math.min(order.length - 1, from + delta));
+            order.splice(to, 0, ...order.splice(from, 1));
+            const next = await run("Reordering", () => api.reorderMods(id, order));
+            if (next) setLoadout(next);
+          }}
+          onRemove={() => setDialog({ kind: "remove-mod", modId: selectedMod.mod.id, name: selectedMod.mod.name })}
+          onRename={() => setDialog({ kind: "rename-mod", modId: selectedMod.mod.id, name: selectedMod.mod.name })}
+          onIdentify={async () => {
+            const next = await run("Looking up on Nexus", () => api.identifyMod(id, selectedMod.mod.id));
+            if (next) {
+              setLoadout(next);
+              const linked = next.mods.find((m) => m.mod.id === selectedMod.mod.id)?.mod;
+              if (linked)
+                toast(
+                  "success",
+                  `Linked to ${linked.name}`,
+                  linked.nexus_file_id
+                    ? "Update checks now cover this mod."
+                    : "Found the mod, but not the exact file; update checks need a re-download via Mod Manager Download.",
+                );
+            }
+          }}
+          onUpdate={async () => {
+            const started = await run("Starting update", () => api.updateMod(selectedMod.mod.id));
+            if (started) toast("info", `Updating ${selectedMod.mod.name}`, "Follow progress in Downloads.");
+          }}
+        />
+      )}
+
+      {dropping && (
+        <div className="drop-overlay">
+          <div>
+            <Icon name="download" size={40} />
+            <h2>Drop to install</h2>
+            <p>Mods are added to “{activeProfile?.name}” and enabled.</p>
+          </div>
+        </div>
+      )}
+
+      {busy === "Installing" && <div className="busy-overlay">Installing…</div>}
+
+      {dialog?.kind === "new-profile" && (
+        <PromptDialog
+          title="New profile"
+          label="Name"
+          confirmLabel="Create"
+          extra={
+            <label className="check">
+              <input type="checkbox" checked={copyProfile} onChange={(e) => setCopyProfile(e.target.checked)} />
+              Start with the mods enabled in “{activeProfile?.name}”
+            </label>
+          }
+          onSubmit={async (name) => {
+            const next = await run("Creating profile", () => api.createProfile(id, name, copyProfile));
+            if (next) setLoadout(next);
+          }}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "rename-profile" && activeProfile && (
+        <PromptDialog
+          title="Rename profile"
+          label="Name"
+          initial={activeProfile.name}
+          confirmLabel="Rename"
+          onSubmit={async (name) => {
+            const next = await run("Renaming profile", () => api.renameProfile(id, activeProfile.id, name));
+            if (next) setLoadout(next);
+          }}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "delete-profile" && activeProfile && (
+        <ConfirmDialog
+          title={`Delete “${activeProfile.name}”?`}
+          message="The profile's mod choices and order are deleted. The mods themselves stay installed."
+          confirmLabel="Delete profile"
+          danger
+          onConfirm={async () => {
+            const next = await run("Deleting profile", () => api.deleteProfile(id, activeProfile.id));
+            if (next) setLoadout(next);
+          }}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "purge" && (
+        <ConfirmDialog
+          title="Remove all mods from the game folder?"
+          message="Every file this app placed is removed and replaced game files are restored. Your mods stay in the library; apply again to bring them back."
+          confirmLabel="Remove from game"
+          danger
+          onConfirm={async () => {
+            const report = await run("Removing mods", () => api.purge(id));
+            if (report) {
+              toast("success", "Game folder restored", describeReport(report));
+              await reload();
+            }
+          }}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "rename-mod" && (
+        <PromptDialog
+          title="Rename mod"
+          label="Name"
+          initial={dialog.name}
+          confirmLabel="Rename"
+          onSubmit={async (name) => {
+            const next = await run("Renaming mod", () => api.renameMod(id, dialog.modId, name));
+            if (next) setLoadout(next);
+          }}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "remove-mod" && (
+        <ConfirmDialog
+          title={`Remove ${dialog.name}?`}
+          message="It's deleted from the library and every profile. Its files leave the game folder when you next apply."
+          confirmLabel="Remove mod"
+          danger
+          onConfirm={async () => {
+            const next = await run("Removing mod", () => api.removeMod(id, dialog.modId));
+            if (next) {
+              setLoadout(next);
+              setSelected(null);
+            }
+          }}
+          onClose={() => setDialog(null)}
+        />
+      )}
+    </div>
+  );
+}

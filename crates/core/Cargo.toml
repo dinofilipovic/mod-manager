@@ -1,0 +1,28 @@
+[package]
+name = "mm-core"
+description = "Game definitions, environment discovery and game detection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+ts-rs.workspace = true
+dirs.workspace = true
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+zip = { version = "9.1.0", default-features = false, features = ["deflate", "deflate64", "bzip2", "lzma", "zstd", "time"] }
+sevenz-rust2 = "0.24"
+unrar = "0.5.8"
+reflink-copy = "0.1.30"
+walkdir = "2.5.0"
+uuid = { version = "1.26.1", features = ["v4"] }
+url = "2.5.8"
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "query", "rustls"] }
+keyring = "4.2.0"
+
+[dev-dependencies]
+tempfile.workspace = true

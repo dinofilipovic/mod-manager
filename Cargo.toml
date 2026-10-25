@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/cli", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.93"
+
+[workspace.dependencies]
+mm-core = { path = "crates/core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+thiserror = "2"
+ts-rs = "11"
+dirs = "6"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true

@@ -1,0 +1,16 @@
+[package]
+name = "mm-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mm"
+path = "src/main.rs"
+
+[dependencies]
+mm-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,15 @@
+# Build output
+/target
+node_modules/
+ui/dist/
+crates/app/gen/schemas/
+
+# Local tooling
+.idea/
+*.log
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
