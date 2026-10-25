@@ -53,6 +53,9 @@ export function App() {
     void refreshNexus();
     void api.listGames().then(setGames);
     void api.listDownloads().then(setDownloads);
+    void api.appInfo().then((info) => {
+      for (const warning of info.warnings) toast("error", "Something needs attention", warning);
+    });
     const unlisten = [
       events.downloadsChanged(setDownloads),
       events.nxmError((message) => toast("error", "Couldn't start the download", message)),

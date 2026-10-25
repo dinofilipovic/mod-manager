@@ -64,6 +64,8 @@ pub struct AppInfo {
     #[ts(type = "number")]
     pub archives_bytes: u64,
     pub crossover_installed: bool,
+    /// Problems found when the library was opened, to show once.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Serialize, TS)]
@@ -131,6 +133,7 @@ pub async fn app_info(app: AppHandle) -> CommandResult<AppInfo> {
             library_bytes: library.disk_usage(),
             archives_bytes: library.archives_bytes(),
             crossover_installed: mm_core::env::runner::crossover_wine().is_some(),
+            warnings: library.warnings().to_vec(),
         })
     })
     .await

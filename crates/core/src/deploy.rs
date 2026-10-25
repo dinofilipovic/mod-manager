@@ -55,6 +55,8 @@ pub struct Deployment<'a> {
     pub protected_dirs: &'a [String],
     /// When the game last changed (an update), Unix seconds.
     pub game_updated_at: Option<i64>,
+    /// The library's unpacked mods, `<mods_root>/<mod id>/<target>`.
+    pub mods_root: &'a Path,
 }
 
 #[derive(Debug, Clone, Default, Serialize, TS)]
@@ -167,9 +169,27 @@ pub fn drift(file: &DeployedFile, path: &Path, game_updated_at: Option<i64>) -> 
     if actual.is_some() && actual == file.backup_sha256 {
         return Some(DriftKind::ReplacedByGame);
     }
+    // Written by the game's update: changed after it was placed and no later
+    // than when the update was noticed. Later changes are someone's edit.
+    let changed_at = mtime.div_euclid(1_000_000_000);
     match (game_updated_at, file.placed_at) {
-        (Some(updated), Some(placed)) if updated >= placed => Some(DriftKind::ReplacedByGame),
+        (Some(updated), Some(placed)) if placed <= changed_at && changed_at <= updated => {
+            Some(DriftKind::ReplacedByGame)
+        }
         _ => Some(DriftKind::Modified),
+    }
+}
+
+/// For deployments recorded before version 3 (no size or hash): whether the
+/// file differs from the mod's file in the library, so an edit is kept.
+fn legacy_edited(d: &Deployment, file: &DeployedFile, path: &Path) -> bool {
+    if file.size.is_some() || !path.is_file() {
+        return false;
+    }
+    let source = join_relative(&d.mods_root.join(&file.mod_id), &file.target);
+    match (sha256_file(&source), sha256_file(path)) {
+        (Ok(want), Ok(have)) => want != have,
+        _ => false,
     }
 }
 
@@ -206,7 +226,7 @@ pub fn deploy(
                 kept.insert(key);
             }
             Some(want) => {
-                if drifted == Some(DriftKind::Modified) {
+                if drifted == Some(DriftKind::Modified) || legacy_edited(d, deployed, &path) {
                     preserve(d, &deployed.target, &path, &mut report)?;
                 }
                 let entry = JournalEntry {
@@ -221,7 +241,7 @@ pub fn deploy(
                 kept.insert(key);
             }
             None => {
-                if drifted == Some(DriftKind::Modified) {
+                if drifted == Some(DriftKind::Modified) || legacy_edited(d, deployed, &path) {
                     preserve(d, &deployed.target, &path, &mut report)?;
                 }
                 let entry = journal_entry(d, JournalOp::Remove, &deployed.target);
@@ -244,23 +264,25 @@ pub fn deploy(
             sha256: want.sha256.clone(),
             ..journal_entry(d, JournalOp::Add, &want.target)
         };
-        if fs::symlink_metadata(&path).is_ok() {
-            // A game or user file we didn't place: keep it to restore later.
+        let occupied = fs::symlink_metadata(&path).is_ok();
+        if join_relative(d.backup_root, &want.target).exists() {
+            // A backup without a deployment record (left by a failed deploy
+            // before the journal existed) holds the real original. It stays
+            // the backup; a file in the game folder is set aside.
             entry.backup = Some(want.target.clone());
-            if join_relative(d.backup_root, &want.target).exists() {
-                // A backup without a deployment record (left by a failed
-                // deploy before the journal existed) holds the real
-                // original; the file in the game folder is set aside.
+            if occupied {
                 preserve(d, &want.target, &path, &mut report)?;
                 remove_file_if_exists(&path).map_err(|e| Error::io(&path, e))?;
                 report.warnings.push(format!(
                     "{}: kept the earlier backup of the original and moved the file in the game folder to the preserved folder",
                     want.target
                 ));
-            } else {
-                entry.moved_original = true;
-                report.backed_up += 1;
             }
+        } else if occupied {
+            // A game or user file we didn't place: keep it to restore later.
+            entry.backup = Some(want.target.clone());
+            entry.moved_original = true;
+            report.backed_up += 1;
         }
         run(d, store, entry, &mut report)?;
         report.added += 1;
@@ -442,12 +464,13 @@ pub fn recover(
         JournalOp::Add => {
             let backup_path = entry.backup.as_ref().map(|b| join_relative(backup_root, b));
             match backup_path {
-                Some(backup_path) if entry.moved_original => {
-                    // Not moved yet means the original is still in place.
-                    if backup_path.exists() {
-                        remove_file_if_exists(&path).map_err(io(&path))?;
-                        move_no_clobber(&backup_path, &path).map_err(io(&path))?;
-                    }
+                // Not moved yet means the original is still in place.
+                Some(backup_path) if entry.moved_original && !backup_path.exists() => {}
+                // The original goes back into the game folder, also when it
+                // was an earlier backup kept as is.
+                Some(backup_path) if backup_path.exists() => {
+                    remove_file_if_exists(&path).map_err(io(&path))?;
+                    move_no_clobber(&backup_path, &path).map_err(io(&path))?;
                 }
                 _ => {
                     remove_file_if_exists(&path).map_err(io(&path))?;
@@ -650,6 +673,7 @@ mod tests {
                 preserved_root: &self.preserved,
                 protected_dirs: &self.protected,
                 game_updated_at: self.game_updated_at,
+                mods_root: &self.staging,
             }
         }
 
@@ -661,6 +685,7 @@ mod tests {
                 preserved_root: &self.preserved,
                 protected_dirs: &self.protected,
                 game_updated_at: self.game_updated_at,
+                mods_root: &self.staging,
             };
             deploy(&d, want, &mut self.store)
         }
@@ -883,6 +908,86 @@ mod tests {
         );
         f.deploy(&BTreeMap::new()).unwrap();
         assert_eq!(f.read("bin/x64/game.exe"), "patched");
+    }
+
+    #[test]
+    fn hand_edits_after_a_game_update_keep_the_original_backup() {
+        let mut f = fixture();
+        let want = desired(vec![stage(&f, "a", "bin/x64/game.exe", "modded")]);
+        f.deploy(&want).unwrap();
+        // The game updated (noticed now), then the user edits the deployed file.
+        f.game_updated_at = Some(crate::library::now() - 1);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let exe = f.game.join("bin/x64/game.exe");
+        fs::remove_file(&exe).unwrap();
+        fs::write(&exe, "edited").unwrap();
+        let check = verify(
+            &f.game,
+            &f.store.deployed_files("i").unwrap(),
+            f.game_updated_at,
+        );
+        assert_eq!(check.drifted[0].kind, DriftKind::Modified);
+
+        let report = f.deploy(&BTreeMap::new()).unwrap();
+        assert_eq!(report.adopted, 0);
+        assert_eq!(report.preserved, ["bin/x64/game.exe"]);
+        assert_eq!(
+            f.read("bin/x64/game.exe"),
+            "exe",
+            "the real original is back"
+        );
+    }
+
+    #[test]
+    fn orphaned_backup_with_an_empty_target_is_restored() {
+        let mut f = fixture();
+        // A failed deploy moved the original aside and nothing is at the target.
+        fs::create_dir_all(f.backup.join("bin/x64")).unwrap();
+        fs::rename(
+            f.game.join("bin/x64/game.exe"),
+            f.backup.join("bin/x64/game.exe"),
+        )
+        .unwrap();
+        let want = desired(vec![stage(&f, "a", "bin/x64/game.exe", "modded")]);
+        f.deploy(&want).unwrap();
+        assert_eq!(f.read("bin/x64/game.exe"), "modded");
+        f.deploy(&BTreeMap::new()).unwrap();
+        assert_eq!(f.read("bin/x64/game.exe"), "exe");
+
+        // Same start, but placing fails: the original goes back into the game.
+        fs::rename(
+            f.game.join("bin/x64/game.exe"),
+            f.backup.join("bin/x64/game.exe"),
+        )
+        .unwrap();
+        let mut broken = stage(&f, "a", "bin/x64/game.exe", "modded");
+        broken.source = f.staging.join("missing");
+        assert!(f.deploy(&desired(vec![broken])).is_err());
+        assert_eq!(f.read("bin/x64/game.exe"), "exe");
+        assert!(!f.backup.join("bin/x64/game.exe").exists());
+    }
+
+    #[test]
+    fn edits_to_files_deployed_before_version_3_are_preserved() {
+        let mut f = fixture();
+        let a = stage(&f, "a", "r6/config/x.json", "{}");
+        fs::create_dir_all(f.game.join("r6/config")).unwrap();
+        fs::write(f.game.join("r6/config/x.json"), "{\"mine\":1}").unwrap();
+        // A version 2 record: no size, time or hash.
+        f.store
+            .set_deployed_files(
+                "i",
+                &[DeployedFile {
+                    target: a.target.clone(),
+                    mod_id: "a".into(),
+                    revision: 1,
+                    ..Default::default()
+                }],
+                0,
+            )
+            .unwrap();
+        let report = f.deploy(&BTreeMap::new()).unwrap();
+        assert_eq!(report.preserved, ["r6/config/x.json"]);
     }
 
     #[test]

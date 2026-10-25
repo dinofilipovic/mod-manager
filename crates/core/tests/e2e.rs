@@ -43,8 +43,11 @@ fn world() -> World {
     }
 }
 
+/// Version 2 also replaces a second original game file.
+const OPTIONS: &str = "r6/config/settings/platform/pc/options.json";
+
 fn mod_version(version: &str) -> fixtures::Entries {
-    vec![
+    let mut entries = vec![
         (
             "archive/pc/mod/lifecycle.archive".into(),
             format!("RDAR lifecycle {version}").into_bytes(),
@@ -61,7 +64,11 @@ fn mod_version(version: &str) -> fixtures::Entries {
             format!("r6/scripts/Lifecycle/only_in_{version}.reds"),
             b"// extra".to_vec(),
         ),
-    ]
+    ];
+    if version == "2" {
+        entries.push((OPTIONS.into(), b"{\"modded\":true}".to_vec()));
+    }
+    entries
 }
 
 /// Folders created by deploying that purging leaves on purpose: the ones
@@ -153,27 +160,30 @@ fn lifecycle(trouble: Trouble) {
     match trouble {
         Trouble::None => {}
         Trouble::FailedDeploy => {
-            // The updated script can't be read from the library.
-            let source = data
-                .join("mods")
-                .join(&mod_id)
-                .join("r6/scripts/Lifecycle/only_in_2.reds");
+            // The file replacing a second original can't be read from the
+            // library: the original was already moved aside when it fails.
+            let source = data.join("mods").join(&mod_id).join(OPTIONS);
             let saved = fs::read(&source).unwrap();
             fs::remove_file(&source).unwrap();
             let err = lib.deploy(&w.game, &w.instance).unwrap_err().to_string();
-            assert!(err.contains("only_in_2.reds"), "{err}");
+            assert!(err.contains("options.json"), "{err}");
             assert!(lib.store().pending_journal().unwrap().is_empty());
+            assert_eq!(
+                fs::read_to_string(root.join(OPTIONS)).unwrap(),
+                "{\"original\":true}",
+                "the original was put back"
+            );
             fs::write(&source, saved).unwrap();
         }
         Trouble::Crash => {
-            // Half of an update deploy happened: the old script was taken
-            // away, the new one placed but not recorded, and the app stopped.
-            let new_target = "r6/scripts/Lifecycle/only_in_2.reds";
-            fs::copy(
-                data.join("mods").join(&mod_id).join(new_target),
-                root.join(new_target),
-            )
-            .unwrap();
+            // The app stopped in the middle of placing a file over a second
+            // original: the original is in the backups, half the mod's file
+            // is in the game folder, and the step is still pending.
+            let new_target = OPTIONS;
+            let backup = data.join("backups").join(&id).join(OPTIONS);
+            fs::create_dir_all(backup.parent().unwrap()).unwrap();
+            fs::rename(root.join(OPTIONS), &backup).unwrap();
+            fs::write(root.join(OPTIONS), "{\"mod").unwrap();
             lib.store()
                 .journal_begin(
                     &JournalEntry {
@@ -192,28 +202,36 @@ fn lifecycle(trouble: Trouble) {
                         mod_id: Some(mod_id.clone()),
                         revision: Some(2),
                         sha256: None,
-                        backup: None,
-                        moved_original: false,
+                        backup: Some(OPTIONS.into()),
+                        moved_original: true,
                     },
                     0,
                 )
                 .unwrap();
             drop(lib);
             lib = Library::open(&data).unwrap();
-            assert!(
-                !root.join(new_target).exists(),
-                "the unrecorded file was taken away again"
+            assert!(lib.warnings().is_empty());
+            assert_eq!(
+                fs::read_to_string(root.join(new_target)).unwrap(),
+                "{\"original\":true}",
+                "the original is back in place"
             );
+            assert!(!backup.exists());
         }
     }
 
     let report = lib.deploy(&w.game, &w.instance).unwrap();
     match trouble {
         // The failed attempt recorded what it finished; the retry continues.
-        Trouble::FailedDeploy => assert_eq!((report.added, report.unchanged), (1, 3), "{report:?}"),
+        Trouble::FailedDeploy => assert_eq!((report.added, report.unchanged), (2, 3), "{report:?}"),
         _ => assert_eq!(
-            (report.replaced, report.added, report.removed),
-            (3, 1, 1),
+            (
+                report.replaced,
+                report.added,
+                report.removed,
+                report.backed_up
+            ),
+            (3, 2, 1, 1),
             "{report:?}"
         ),
     }
@@ -229,7 +247,7 @@ fn lifecycle(trouble: Trouble) {
 
     // Purge: everything back as it was.
     let report = lib.purge(&w.game, &w.instance).unwrap();
-    assert_eq!(report.restored, 1);
+    assert_eq!(report.restored, 2);
     assert!(lib.store().deployed_files(&id).unwrap().is_empty());
     assert_restored(&w, &files_before, &dirs_before);
     assert!(
@@ -251,4 +269,47 @@ fn lifecycle_with_a_failed_deploy_ends_byte_identical() {
 #[test]
 fn lifecycle_with_a_crash_ends_byte_identical() {
     lifecycle(Trouble::Crash);
+}
+
+/// The game updates, then the user edits a deployed file: the edit is kept
+/// aside on purge and the real original comes back.
+#[test]
+fn game_update_then_hand_edit_ends_byte_identical() {
+    let w = world();
+    let root = w.instance.install_path.clone();
+    let files_before = fixtures::snapshot(&root);
+    let dirs_before = fixtures::dir_snapshot(&root);
+    let data = w.tmp.path().join("data");
+    let mut lib = Library::open(&data).unwrap();
+    let id = w.instance.id.clone();
+    let v1 = fixtures::write_zip(&w.tmp.path().join("in/v1.zip"), &mod_version("1"));
+    lib.install_archive(&w.game, &v1, ModMeta::default(), Some(&id))
+        .unwrap();
+    lib.deploy(&w.game, &w.instance).unwrap();
+
+    // The executable changes (a patch) and the app notices.
+    let mut patched = w.instance.clone();
+    patched.fingerprint = "patched".into();
+    lib.loadout(&w.game, &patched).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let ini = root.join("engine/config/base/general.ini");
+    fs::remove_file(&ini).unwrap();
+    fs::write(&ini, "[General]\nTweakedByHand=1\n").unwrap();
+
+    let check = lib.verify_deployment(&w.game, &patched).unwrap();
+    assert_eq!(check.drifted.len(), 1);
+    assert_eq!(check.drifted[0].kind, mm_core::deploy::DriftKind::Modified);
+    let report = lib.purge(&w.game, &patched).unwrap();
+    assert_eq!(report.adopted, 0);
+    assert_eq!(report.preserved, ["engine/config/base/general.ini"]);
+    assert_eq!(
+        fs::read_to_string(
+            data.join("preserved")
+                .join(&id)
+                .join("engine/config/base/general.ini")
+        )
+        .unwrap(),
+        "[General]\nTweakedByHand=1\n"
+    );
+    assert_restored(&w, &files_before, &dirs_before);
 }

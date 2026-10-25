@@ -727,6 +727,7 @@ export function GameView({
             const report = await run("Removing mods", () => api.purge(id));
             if (report) {
               toast("success", "Game folder restored", describeReport(report));
+              if (report.warnings.length) toast("info", "Check these files", report.warnings.join("\n"));
               await reload();
             }
           }}

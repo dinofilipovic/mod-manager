@@ -313,15 +313,19 @@ impl Store {
     fn init(conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        // Durable across app crashes; the deploy journal commits per file.
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        let mut version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version == 0 {
-            conn.execute_batch(BASE_SCHEMA)?;
-            version = BASE_VERSION;
-        }
+        // The deploy journal's intent rows must be on disk before the file
+        // operation they describe, also across a power loss.
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version < SCHEMA_VERSION {
+            // One transaction: a crash leaves the database as it was.
             let tx = conn.unchecked_transaction()?;
+            let version = if version == 0 {
+                tx.execute_batch(BASE_SCHEMA)?;
+                BASE_VERSION
+            } else {
+                version
+            };
             for (from, migration) in MIGRATIONS {
                 if version <= *from {
                     tx.execute_batch(migration)?;

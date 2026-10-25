@@ -189,6 +189,9 @@ pub struct Library {
     root: PathBuf,
     /// Extracted FOMOD archives waiting for the user's choices, by token.
     pending: HashMap<String, PendingFomod>,
+    /// Problems found while opening (an interrupted deploy that couldn't be
+    /// finished yet), to show the user.
+    warnings: Vec<String>,
 }
 
 struct PendingFomod {
@@ -253,14 +256,24 @@ impl Library {
             store,
             root: root.to_path_buf(),
             pending: HashMap::new(),
+            warnings: Vec::new(),
         };
         library.clean_tmp();
-        library.recover_deployments()?;
+        // A recovery that fails now (say, the game's drive isn't mounted) is
+        // retried before the next deploy; it mustn't keep the app from starting.
+        library.warnings = library.recover_deployments()?;
         library.sweep_archives()?;
         Ok(library)
     }
 
+    /// Problems found while opening the library.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
     /// Drops archive records whose file is gone and files no record knows.
+    /// Recent files are left alone: another process (the CLI next to the
+    /// app) may be adding them right now.
     fn sweep_archives(&self) -> Result<()> {
         let mut known = Vec::new();
         for a in self.store.archives()? {
@@ -270,15 +283,23 @@ impl Library {
                 self.store.delete_archive(a.id)?;
             }
         }
+        let cutoff = SystemTime::now() - std::time::Duration::from_secs(600);
         for orphan in archives::orphan_files(&self.root, &known) {
-            let _ = fs::remove_file(orphan);
+            let old = fs::metadata(&orphan)
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t < cutoff);
+            if old {
+                let _ = fs::remove_file(orphan);
+            }
         }
         Ok(())
     }
 
     /// Finishes or undoes deployment steps cut short when the app last
-    /// stopped, so the record matches the game folder again.
-    fn recover_deployments(&mut self) -> Result<()> {
+    /// stopped, so the record matches the game folder again. Returns the
+    /// steps that couldn't be recovered; they stay pending.
+    fn recover_deployments(&mut self) -> Result<Vec<String>> {
+        let mut failed = Vec::new();
         for entry in self.store.pending_journal()? {
             // Instance ids start with the game id, which says which folders
             // must stay even when empty.
@@ -289,9 +310,15 @@ impl Library {
                 .map(|g| protected_dirs(&g))
                 .unwrap_or_default();
             let backups = self.backup_dir(&entry.instance_id);
-            deploy::recover(&entry, &backups, &protected, &mut self.store)?;
+            if let Err(e) = deploy::recover(&entry, &backups, &protected, &mut self.store) {
+                failed.push(format!(
+                    "An interrupted apply couldn't be finished for {} ({e}). Check that the game folder is reachable; it is retried before the next apply.",
+                    entry.target
+                ));
+            }
         }
-        self.store.clear_finished_journal()
+        self.store.clear_finished_journal()?;
+        Ok(failed)
     }
 
     pub fn root(&self) -> &Path {
@@ -757,8 +784,13 @@ impl Library {
                     .filter_map(|r| names.get(&r.mod_id).cloned())
                     .collect();
                 mods.dedup();
+                // An installer waiting for choices still needs its archive.
+                let waiting = self
+                    .pending
+                    .values()
+                    .any(|p| p.meta.archive_id == Some(archive.id));
                 ArchiveUsage {
-                    unused: mods.is_empty(),
+                    unused: mods.is_empty() && !waiting,
                     mods,
                     archive,
                 }
@@ -1359,6 +1391,12 @@ impl Library {
             self.store
                 .observe_game(&instance.id, &instance.fingerprint, now())?
         };
+        // Steps an earlier apply couldn't finish come first, or this one
+        // would plan from a game folder the record doesn't describe.
+        let unfinished = self.recover_deployments()?;
+        if let Some(problem) = unfinished.into_iter().next() {
+            return Err(Error::Install(problem));
+        }
         backup_database(&self.root, &self.root.join("library.db"), "pre-deploy")?;
         let protected = protected_dirs(game);
         let backups = self.backup_dir(&instance.id);
@@ -1370,6 +1408,7 @@ impl Library {
             preserved_root: &preserved,
             protected_dirs: &protected,
             game_updated_at,
+            mods_root: &self.root.join("mods"),
         };
         deploy::deploy(&deployment, desired, &mut self.store)
     }
@@ -2131,10 +2170,22 @@ mod tests {
 
         let root = f.lib.root().to_path_buf();
         fs::write(root.join("archives/stray.zip"), "x").unwrap();
+        fs::write(root.join("archives/.incoming-new"), "x").unwrap();
+        // Only files older than a few minutes are someone's leftovers.
+        fs::File::options()
+            .write(true)
+            .open(root.join("archives/stray.zip"))
+            .unwrap()
+            .set_modified(SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
         let stored = root.join(&f.lib.archive_usage().unwrap()[0].archive.path);
         fs::remove_file(&stored).unwrap();
         let lib = Library::open(&root).unwrap();
         assert!(!root.join("archives/stray.zip").exists());
+        assert!(
+            root.join("archives/.incoming-new").exists(),
+            "maybe still being added"
+        );
         assert!(
             lib.archive_usage().unwrap().is_empty(),
             "missing file, record dropped"

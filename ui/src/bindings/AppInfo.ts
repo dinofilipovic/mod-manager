@@ -4,4 +4,8 @@ export type AppInfo = { version: string, data_dir: string, library_bytes: number
 /**
  * Size of the archive store.
  */
-archives_bytes: number, crossover_installed: boolean, };
+archives_bytes: number, crossover_installed: boolean, 
+/**
+ * Problems found when the library was opened, to show once.
+ */
+warnings: Array<string>, };

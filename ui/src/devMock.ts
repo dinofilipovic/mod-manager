@@ -232,6 +232,7 @@ export function installDevMock() {
             library_bytes: 4_300_000_000,
             archives_bytes: 2_150_000_000,
             crossover_installed: true,
+            warnings: [],
           };
         case "verify_deployment":
           return {
