@@ -20,6 +20,78 @@ const ENTRY_SIZE: u64 = 56;
 const SEGMENT_SIZE: u64 = 16;
 const DEPENDENCY_SIZE: u64 = 8;
 
+/// Two mods' archives changing the same game resources.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct ResourceConflict {
+    pub winner_mod: String,
+    pub winner_archive: String,
+    pub loser_mod: String,
+    pub loser_archive: String,
+    /// Resources both change; the winner's version is used.
+    pub resources: u32,
+}
+
+/// An archive of an enabled mod, in load order (later mods win in the list).
+pub struct ModArchive<'a> {
+    pub mod_name: &'a str,
+    pub list_position: usize,
+    /// The file name in the game's mod folder.
+    pub name: &'a str,
+    pub hashes: &'a [u64],
+}
+
+/// Which archives change the same resources, and which one the game uses:
+/// by file name the first one loaded (alphabetical) wins; with the list
+/// order the game loads the lowest mod first, so it wins.
+pub fn conflicts(archives: &[ModArchive], by_list: bool) -> Vec<ResourceConflict> {
+    let mut owners: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
+    for (i, a) in archives.iter().enumerate() {
+        for h in a.hashes {
+            owners.entry(*h).or_default().push(i);
+        }
+    }
+    let wins = |a: &ModArchive, b: &ModArchive| {
+        if by_list {
+            a.list_position > b.list_position
+        } else {
+            a.name.to_ascii_lowercase() < b.name.to_ascii_lowercase()
+        }
+    };
+    let mut pairs: std::collections::BTreeMap<(usize, usize), u32> =
+        std::collections::BTreeMap::new();
+    for list in owners.values().filter(|l| l.len() > 1) {
+        let winner = list
+            .iter()
+            .copied()
+            .reduce(|best, i| {
+                if wins(&archives[i], &archives[best]) {
+                    i
+                } else {
+                    best
+                }
+            })
+            .unwrap_or_default();
+        for &loser in list.iter().filter(|&&i| i != winner) {
+            if archives[loser].mod_name != archives[winner].mod_name {
+                *pairs.entry((winner, loser)).or_default() += 1;
+            }
+        }
+    }
+    let mut out: Vec<ResourceConflict> = pairs
+        .into_iter()
+        .map(|((w, l), resources)| ResourceConflict {
+            winner_mod: archives[w].mod_name.to_string(),
+            winner_archive: archives[w].name.to_string(),
+            loser_mod: archives[l].mod_name.to_string(),
+            loser_archive: archives[l].name.to_string(),
+            resources,
+        })
+        .collect();
+    out.sort_by_key(|c| std::cmp::Reverse(c.resources));
+    out
+}
+
 /// What is wrong with an archive file, in words for the user.
 pub type Problem = String;
 
@@ -121,6 +193,51 @@ pub(crate) mod tests {
         assert!(resource_hashes(&path).unwrap_err().contains("incomplete"));
         std::fs::write(&path, b"PK\x03\x04 a zip renamed").unwrap();
         assert!(resource_hashes(&path).unwrap_err().contains("RDAR"));
+    }
+
+    #[test]
+    fn finds_resource_conflicts_and_their_winner() {
+        let a = [1u64, 2, 3];
+        let b = [3u64, 4];
+        let c = [2u64, 3];
+        let archives = [
+            ModArchive {
+                mod_name: "Alpha",
+                list_position: 0,
+                name: "zz_alpha.archive",
+                hashes: &a,
+            },
+            ModArchive {
+                mod_name: "Beta",
+                list_position: 1,
+                name: "aa_beta.archive",
+                hashes: &b,
+            },
+            ModArchive {
+                mod_name: "Gamma",
+                list_position: 2,
+                name: "mm_gamma.archive",
+                hashes: &c,
+            },
+        ];
+        // By file name: aa_beta loads first and wins resource 3; mm_gamma beats zz_alpha on 2.
+        let by_name = conflicts(&archives, false);
+        let summary: Vec<(&str, &str, u32)> = by_name
+            .iter()
+            .map(|c| (c.winner_mod.as_str(), c.loser_mod.as_str(), c.resources))
+            .collect();
+        assert_eq!(summary.len(), 3);
+        assert!(summary.contains(&("Beta", "Alpha", 1)));
+        assert!(summary.contains(&("Beta", "Gamma", 1)));
+        assert!(summary.contains(&("Gamma", "Alpha", 1)));
+        // By list: the lowest mod (Gamma) wins both its resources.
+        let by_list = conflicts(&archives, true);
+        assert!(by_list.iter().all(|c| c.winner_mod != "Alpha"));
+        assert!(
+            by_list
+                .iter()
+                .any(|c| c.winner_mod == "Gamma" && c.loser_mod == "Alpha" && c.resources == 2)
+        );
     }
 
     /// The game's own archives: `MM_GAME_ARCHIVES=<game>/archive/pc/content`.

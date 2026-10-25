@@ -21,6 +21,7 @@ use ts_rs::TS;
 use walkdir::WalkDir;
 
 use crate::archive;
+use crate::archive_index::{ModArchive, ResourceConflict};
 use crate::archives::{
     self, ArchiveRecord, ArchiveRetention, ArchiveSource, ArchiveUsage, Hashes, Ingest,
     ModArchiveSize,
@@ -169,6 +170,9 @@ pub struct LoadoutMod {
     pub wont_load: bool,
     /// Whether the logs say it loaded, as of the last refresh.
     pub status: Option<ModStatus>,
+    /// Game resources inside its `.archive` files that another enabled
+    /// mod's archives change too, and who wins.
+    pub resource_conflicts: Vec<ResourceConflict>,
 }
 
 const PROFILE_FORMAT: &str = "mod-manager-profile";
@@ -221,6 +225,8 @@ pub struct Library {
     /// Problems found while opening (an interrupted deploy that couldn't be
     /// finished yet), to show the user.
     warnings: Vec<String>,
+    /// Resource hashes of `.archive` files, by path, size and time.
+    archive_indexes: HashMap<PathBuf, (u64, i64, Vec<u64>)>,
 }
 
 struct PendingFomod {
@@ -554,6 +560,7 @@ impl Library {
             root: root.to_path_buf(),
             pending: HashMap::new(),
             warnings: Vec::new(),
+            archive_indexes: HashMap::new(),
         };
         library.clean_tmp();
         // A recovery that fails now (say, the game's drive isn't mounted) is
@@ -2116,6 +2123,7 @@ impl Library {
         self.set_framework_versions(game, instance, &mut analysis.frameworks, &mods);
         let mut checks = self.mod_checks(game, &mods)?;
         let mut statuses = self.store.mod_statuses(&instance.id)?;
+        let resource_conflicts = self.resource_conflicts(game, instance, &entries, &mods, &files);
         let mut dependencies = {
             let nodes: Vec<ModNode> = entries
                 .iter()
@@ -2174,6 +2182,16 @@ impl Library {
                         .is_some_and(|c| validate::wont_load(c)),
                     checks: checks.remove(&e.mod_id).unwrap_or_default(),
                     status: statuses.remove(&e.mod_id).filter(|_| e.enabled),
+                    resource_conflicts: mods
+                        .get(&e.mod_id)
+                        .map(|m| {
+                            resource_conflicts
+                                .iter()
+                                .filter(|c| c.winner_mod == m.name || c.loser_mod == m.name)
+                                .cloned()
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 })
             })
             .collect();
@@ -2207,6 +2225,71 @@ impl Library {
                 .as_ref()
                 .map(|_| self.archive_order(&instance.id)),
         })
+    }
+
+    /// Resources changed by more than one enabled mod's `.archive` files.
+    /// Archive indexes are read from the library's copies and cached.
+    fn resource_conflicts(
+        &mut self,
+        game: &GameDefinition,
+        instance: &GameInstance,
+        entries: &[ProfileEntry],
+        mods: &HashMap<String, ModRecord>,
+        files: &[Vec<String>],
+    ) -> Vec<ResourceConflict> {
+        let Some(order) = &game.load_order else {
+            return Vec::new();
+        };
+        let folder = order
+            .file
+            .rsplit_once('/')
+            .map_or("", |(d, _)| d)
+            .to_ascii_lowercase();
+        let mut found: Vec<(String, usize, String, Vec<u64>)> = Vec::new();
+        for (position, (entry, targets)) in entries.iter().zip(files).enumerate() {
+            let Some(record) = mods.get(&entry.mod_id).filter(|_| entry.enabled) else {
+                continue;
+            };
+            for target in targets {
+                let Some((parent, name)) = target.rsplit_once('/') else {
+                    continue;
+                };
+                let is_archive = parent.eq_ignore_ascii_case(&folder)
+                    && name.rsplit_once('.').is_some_and(|(_, ext)| {
+                        order.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))
+                    });
+                if !is_archive {
+                    continue;
+                }
+                let path = join_relative(&self.mod_dir(&record.id), target);
+                let Ok((size, mtime)) = crate::fs_util::size_and_mtime(&path) else {
+                    continue;
+                };
+                let hashes = match self.archive_indexes.get(&path) {
+                    Some((s, m, h)) if *s == size && *m == mtime => h.clone(),
+                    _ => {
+                        let h = crate::archive_index::resource_hashes(&path).unwrap_or_default();
+                        self.archive_indexes
+                            .insert(path.clone(), (size, mtime, h.clone()));
+                        h
+                    }
+                };
+                found.push((record.name.clone(), position, name.to_string(), hashes));
+            }
+        }
+        let archives: Vec<ModArchive> = found
+            .iter()
+            .map(|(mod_name, position, name, hashes)| ModArchive {
+                mod_name,
+                list_position: *position,
+                name,
+                hashes,
+            })
+            .collect();
+        crate::archive_index::conflicts(
+            &archives,
+            self.archive_order(&instance.id) == ArchiveOrder::ByList,
+        )
     }
 
     /// Static check results of the game's mods, checking any installed or
@@ -3255,6 +3338,47 @@ mod tests {
             apply.severity,
             PreflightSeverity::Warning,
             "Play applies first anyway"
+        );
+    }
+
+    #[test]
+    fn archives_changing_the_same_resources_are_reported() {
+        let mut f = fixture();
+        let id = f.instance.id.clone();
+        let write_archive = |name: &str, hashes: &[u64]| {
+            let path = f.archives.join(name);
+            let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+            zip.start_file(
+                format!("archive/pc/mod/{}.archive", name.trim_end_matches(".zip")),
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(&crate::archive_index::tests::build(hashes))
+                .unwrap();
+            zip.finish().unwrap();
+            path
+        };
+        let a = write_archive("zz_retexture.zip", &[1, 2, 3]);
+        let b = write_archive("aa_overhaul.zip", &[3, 4]);
+        f.lib
+            .install_archive(&f.game, &a, ModMeta::default(), Some(&id))
+            .unwrap();
+        f.lib
+            .install_archive(&f.game, &b, ModMeta::default(), Some(&id))
+            .unwrap();
+        let loadout = f.lib.loadout(&f.game, &f.instance).unwrap();
+        let conflicts = &loadout.mods[0].resource_conflicts;
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(
+            (conflicts[0].winner_archive.as_str(), conflicts[0].resources),
+            ("aa_overhaul.archive", 1),
+            "the game loads aa_ first, so it wins"
+        );
+        f.lib.set_archive_order(&id, ArchiveOrder::ByList).unwrap();
+        let loadout = f.lib.loadout(&f.game, &f.instance).unwrap();
+        assert_eq!(
+            loadout.mods[0].resource_conflicts[0].winner_mod, "aa overhaul",
+            "lower in the list wins too"
         );
     }
 

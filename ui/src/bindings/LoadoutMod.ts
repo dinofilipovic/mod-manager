@@ -4,6 +4,7 @@ import type { DependencyStatus } from "./DependencyStatus";
 import type { MissingRequirement } from "./MissingRequirement";
 import type { ModRecord } from "./ModRecord";
 import type { ModStatus } from "./ModStatus";
+import type { ResourceConflict } from "./ResourceConflict";
 
 export type LoadoutMod = { mod: ModRecord, enabled: boolean, 
 /**
@@ -42,4 +43,9 @@ wont_load: boolean,
 /**
  * Whether the logs say it loaded, as of the last refresh.
  */
-status: ModStatus | null, };
+status: ModStatus | null, 
+/**
+ * Game resources inside its `.archive` files that another enabled
+ * mod's archives change too, and who wins.
+ */
+resource_conflicts: Array<ResourceConflict>, };

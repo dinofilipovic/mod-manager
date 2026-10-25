@@ -232,6 +232,28 @@ export function ModDetails({
         </div>
       )}
 
+      {entry.enabled && entry.resource_conflicts.length > 0 && (
+        <div className="conflicts">
+          <h3>
+            <Icon name="layers" size={12} /> Changes the same game resources as other archives
+          </h3>
+          {entry.resource_conflicts.map((c) => {
+            const wins = c.winner_mod === m.name;
+            return (
+              <p key={`${c.winner_archive}-${c.loser_archive}`}>
+                <span className={wins ? "win" : "lose"}>{wins ? "Wins over" : "Loses to"}</span>{" "}
+                {wins ? c.loser_mod : c.winner_mod}{" "}
+                <span className="muted small">
+                  ({c.resources === 1 ? "1 resource" : `${c.resources} resources`},{" "}
+                  {wins ? c.winner_archive : c.loser_archive} vs {wins ? c.loser_archive : c.winner_archive})
+                </span>
+              </p>
+            );
+          })}
+          <p className="muted">The archive the game loads first wins; see Archive load order in Health.</p>
+        </div>
+      )}
+
       <dl className="facts">
         <dt>Load order</dt>
         <dd>
