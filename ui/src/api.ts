@@ -31,6 +31,7 @@ import type { ModChangelog } from "./bindings/ModChangelog";
 import type { ReinstallResult } from "./bindings/ReinstallResult";
 import type { DependencyKind } from "./bindings/DependencyKind";
 import type { RequirementsResult } from "./bindings/RequirementsResult";
+import type { Preflight } from "./bindings/Preflight";
 import type { RevisionInfo } from "./bindings/RevisionInfo";
 import type { RateLimits } from "./bindings/RateLimits";
 import type { UpdateAllResult } from "./bindings/UpdateAllResult";
@@ -117,6 +118,7 @@ export const api = {
     invoke<Loadout>("add_dependency", { instanceId, modId, kind, target, optional }),
   removeDependency: (instanceId: string, modId: string, kind: DependencyKind, target: string) =>
     invoke<Loadout>("remove_dependency", { instanceId, modId, kind, target }),
+  preflight: (instanceId: string) => invoke<Preflight>("preflight", { instanceId }),
   getMissing: (instanceId: string) => invoke<UpdateAllResult>("get_missing", { instanceId }),
   modRevisions: (modId: string) => invoke<RevisionInfo[]>("mod_revisions", { modId }),
   reinstallMod: (instanceId: string, modId: string, revision: number, changeOptions: boolean) =>

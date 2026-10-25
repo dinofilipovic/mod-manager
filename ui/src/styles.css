@@ -2189,3 +2189,30 @@ button.small {
   font-size: 12px;
   word-break: break-word;
 }
+
+.preflight-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.preflight-list li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.preflight-list li.error > svg {
+  color: var(--danger);
+}
+
+.preflight-list li.warning > svg {
+  color: var(--warn);
+}
+
+.preflight-list p {
+  margin: 2px 0 0;
+}

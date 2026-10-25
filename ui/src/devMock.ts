@@ -362,6 +362,35 @@ export function installDevMock() {
         case "reinstall_mod":
         case "rollback_mod":
           return { outcome: { mod: mods[0].mod, skipped: [], warnings: [], replaced_existing: true, replayed_choices: true }, fomod: null };
+        case "preflight":
+          return {
+            items: [
+              {
+                severity: "Error",
+                title: "Cyber Engine Tweaks is too old for this game version",
+                detail: "Game 2.5 needs Cyber Engine Tweaks 1.38.0 or newer; 1.35.0 is installed. Mods that need it won't load.",
+                action: { action: "OpenNexus", nexus_mod_id: 107 },
+              },
+              {
+                severity: "Error",
+                title: "Immersive HUD needs redscript",
+                detail: "redscript isn't installed, so Immersive HUD won't work.",
+                action: { action: "OpenNexus", nexus_mod_id: 1511 },
+              },
+              {
+                severity: "Error",
+                title: "Night City Radio Expanded won't load",
+                detail: "mods/NightCityRadio/info.json isn't valid JSON.",
+                action: { action: "ShowMod", mod_id: "redmod" },
+              },
+              {
+                severity: "Warning",
+                title: "The game folder doesn't match the mod list",
+                detail: "Changes aren't applied yet. Applying puts them in the game.",
+                action: { action: "Apply" },
+              },
+            ],
+          };
         case "fetch_requirements":
           return { updated: 4, loadout: loadout() };
         case "add_dependency":

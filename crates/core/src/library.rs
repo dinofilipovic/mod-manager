@@ -36,6 +36,7 @@ use crate::game::GameDefinition;
 use crate::health;
 use crate::installer::{self, InstallPlan};
 use crate::nexus::{NexusMatch, parse_archive_name};
+use crate::preflight::Preflight;
 use crate::requirements::{self, FrameworkState, FrameworkStatus, MissingRequirement, ModFiles};
 use crate::saves;
 use crate::store::{ModFile, ModRecord, ModRevision, Profile, ProfileEntry, Store};
@@ -1226,6 +1227,147 @@ impl Library {
     ) -> Result<()> {
         self.store
             .set_changelog(game_domain, nexus_mod_id, now(), entries)
+    }
+
+    // Before launching
+
+    /// What would keep mods from working if the game started now.
+    pub fn preflight(
+        &mut self,
+        game: &GameDefinition,
+        instance: &GameInstance,
+    ) -> Result<Preflight> {
+        use crate::preflight::{
+            PreflightAction as Action, PreflightItem as Item, PreflightSeverity as Severity,
+        };
+        let loadout = self.loadout(game, instance)?;
+        let mut items = Vec::new();
+        let missing_dlls: Vec<&str> = instance
+            .dll_overrides
+            .iter()
+            .filter(|d| !d.satisfied)
+            .map(|d| d.dll.as_str())
+            .collect();
+        if !missing_dlls.is_empty() {
+            items.push(Item {
+                severity: Severity::Error,
+                title: "Wine won't load the script extenders".into(),
+                detail: format!(
+                    "The DLL overrides for {} aren't set in this bottle. Fix them, then launch.",
+                    missing_dlls.join(", ")
+                ),
+                action: Action::FixDllOverrides,
+            });
+        }
+        for f in loadout.frameworks.iter().filter(|f| f.too_old) {
+            items.push(Item {
+                severity: Severity::Error,
+                title: format!("{} is too old for this game version", f.name),
+                detail: format!(
+                    "Game {} needs {} {} or newer; {} is installed. Mods that need it won't load.",
+                    loadout.game.version.as_deref().unwrap_or("?"),
+                    f.name,
+                    f.min_version.as_deref().unwrap_or("?"),
+                    f.version.as_deref().unwrap_or("an older version")
+                ),
+                action: f
+                    .nexus_mod_id
+                    .map_or(Action::None, |id| Action::OpenNexus { nexus_mod_id: id }),
+            });
+        }
+        for m in loadout.mods.iter().filter(|m| m.enabled) {
+            if m.wont_load {
+                let why = m
+                    .checks
+                    .iter()
+                    .find(|c| c.severity == validate::CheckSeverity::Error)
+                    .map(|c| c.message.clone())
+                    .unwrap_or_default();
+                items.push(Item {
+                    severity: Severity::Error,
+                    title: format!("{} won't load", m.record.name),
+                    detail: why,
+                    action: Action::ShowMod {
+                        mod_id: m.record.id.clone(),
+                    },
+                });
+            }
+            for d in m.requires.iter().filter(|d| d.is_unmet()) {
+                // Too-old frameworks are listed once above.
+                if matches!(d.state, dependencies::DependencyState::TooOld { .. })
+                    && d.kind == DependencyKind::Framework
+                {
+                    continue;
+                }
+                let (what, action) = match &d.state {
+                    dependencies::DependencyState::Disabled { mod_id, .. } => (
+                        format!("{} is disabled", d.name),
+                        Action::EnableMod {
+                            mod_id: mod_id.clone(),
+                        },
+                    ),
+                    dependencies::DependencyState::TooOld { have, need } => (
+                        format!("{} is {have}, it needs {need}", d.name),
+                        d.nexus_mod_id
+                            .map_or(Action::None, |id| Action::OpenNexus { nexus_mod_id: id }),
+                    ),
+                    _ => (
+                        format!("{} isn't installed", d.name),
+                        d.nexus_mod_id
+                            .map_or(Action::None, |id| Action::OpenNexus { nexus_mod_id: id }),
+                    ),
+                };
+                items.push(Item {
+                    severity: Severity::Error,
+                    title: format!("{} needs {}", m.record.name, d.name),
+                    detail: format!("{what}, so {} won't work.", m.record.name),
+                    action,
+                });
+            }
+        }
+        for cycle in &loadout.dependency_cycles {
+            items.push(Item {
+                severity: Severity::Warning,
+                title: "Mods that need each other in a circle".into(),
+                detail: format!(
+                    "{} require each other. Usually one requirement is wrong.",
+                    cycle.join(", ")
+                ),
+                action: Action::None,
+            });
+        }
+        let check = self.verify_deployment(game, instance)?;
+        let lost = check
+            .drifted
+            .iter()
+            .filter(|d| d.kind != deploy::DriftKind::Modified)
+            .count();
+        if lost > 0 || loadout.pending_changes {
+            items.push(Item {
+                severity: Severity::Warning,
+                title: "The game folder doesn't match the mod list".into(),
+                detail: if lost > 0 {
+                    format!("{lost} placed files are missing or were replaced by the game. Applying puts them back.")
+                } else {
+                    "Changes aren't applied yet. Applying puts them in the game.".into()
+                },
+                action: Action::Apply,
+            });
+        }
+        for token in self.pending.keys() {
+            let request = self.fomod_request(token)?;
+            if request.game_id == game.id {
+                items.push(Item {
+                    severity: Severity::Warning,
+                    title: format!("{} waits for installer choices", request.mod_name),
+                    detail: "It isn't installed until you choose its options.".into(),
+                    action: Action::ChooseOptions {
+                        token: token.clone(),
+                    },
+                });
+            }
+        }
+        Ok(Preflight { items })
     }
 
     // Requirements
@@ -2997,6 +3139,73 @@ mod tests {
         assert_eq!(by_name("bad").checks[0].check, "yaml");
         // Stored per revision: a second loadout doesn't check again.
         assert_eq!(f.lib.store().mod_checks().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn preflight_lists_what_would_break_the_launch() {
+        use crate::preflight::{PreflightAction, PreflightSeverity};
+        let mut f = fixture();
+        f.instance.version = Some("2.5".into());
+        f.instance.dll_overrides = vec![crate::detect::DllOverrideStatus {
+            dll: "winmm".into(),
+            required: "native,builtin".into(),
+            current: None,
+            satisfied: false,
+            reason: String::new(),
+        }];
+        let id = f.instance.id.clone();
+        let script = zip(&f, "script.zip", &[("r6/scripts/Cool/main.reds", "x")]);
+        let broken = zip(
+            &f,
+            "broken.zip",
+            &[("r6/tweaks/Bad/bad.yaml", "key: \"open\n")],
+        );
+        let cet = zip(
+            &f,
+            "cet.zip",
+            &[("bin/x64/plugins/cyber_engine_tweaks.asi", "not a dll")],
+        );
+        f.lib
+            .install_archive(&f.game, &script, ModMeta::default(), Some(&id))
+            .unwrap();
+        f.lib
+            .install_archive(&f.game, &broken, ModMeta::default(), Some(&id))
+            .unwrap();
+        let cet_meta = ModMeta {
+            version: Some("1.35.0".into()),
+            ..Default::default()
+        };
+        f.lib
+            .install_archive(&f.game, &cet, cet_meta, Some(&id))
+            .unwrap();
+
+        let preflight = f.lib.preflight(&f.game, &f.instance).unwrap();
+        let titles: Vec<(&str, PreflightSeverity)> = preflight
+            .items
+            .iter()
+            .map(|i| (i.title.as_str(), i.severity))
+            .collect();
+        assert!(preflight.has_errors());
+        assert!(titles.contains(&(
+            "Wine won't load the script extenders",
+            PreflightSeverity::Error
+        )));
+        assert!(titles.contains(&(
+            "Cyber Engine Tweaks is too old for this game version",
+            PreflightSeverity::Error
+        )));
+        assert!(titles.contains(&("broken won't load", PreflightSeverity::Error)));
+        assert!(titles.contains(&("script needs redscript", PreflightSeverity::Error)));
+        let apply = preflight
+            .items
+            .iter()
+            .find(|i| i.action == PreflightAction::Apply)
+            .unwrap();
+        assert_eq!(
+            apply.severity,
+            PreflightSeverity::Warning,
+            "Play applies first anyway"
+        );
     }
 
     #[test]

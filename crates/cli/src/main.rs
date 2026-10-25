@@ -92,6 +92,11 @@ enum Command {
         #[arg(long)]
         fetch: bool,
     },
+    /// List what would keep mods from working if the game started now.
+    Preflight {
+        #[arg(long)]
+        instance: Option<String>,
+    },
     /// Check that deployed files are still as they were placed.
     Verify {
         #[arg(long)]
@@ -253,6 +258,26 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print_deps(&loadout);
+            }
+        }
+        Command::Preflight { instance } => {
+            let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
+            let preflight = open_library()?.preflight(&game, &instance)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&preflight)?);
+            } else if preflight.items.is_empty() {
+                println!("Ready to play: nothing found that would keep mods from working.");
+            } else {
+                for item in &preflight.items {
+                    let mark = match item.severity {
+                        mm_core::preflight::PreflightSeverity::Error => "ERROR",
+                        mm_core::preflight::PreflightSeverity::Warning => "warning",
+                    };
+                    println!("[{mark}] {}\n        {}", item.title, item.detail);
+                }
+            }
+            if preflight.has_errors() {
+                std::process::exit(2);
             }
         }
         Command::Verify { instance } => {

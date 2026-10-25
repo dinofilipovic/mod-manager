@@ -145,6 +145,7 @@ fn main() {
             commands::add_dependency,
             commands::remove_dependency,
             commands::get_missing,
+            commands::preflight,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start the app");

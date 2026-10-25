@@ -23,6 +23,7 @@ import type { Loadout } from "../bindings/Loadout";
 import type { NexusStatus } from "../bindings/NexusStatus";
 import type { ScanResult } from "../bindings/ScanResult";
 import type { UpdateLink } from "../bindings/UpdateLink";
+import type { PreflightItem } from "../bindings/PreflightItem";
 import { ConfirmDialog, Dialog, PromptDialog } from "../components/Dialog";
 import { Icon } from "../components/Icon";
 import { useToast } from "../components/Toasts";
@@ -41,6 +42,7 @@ type DialogState =
   | { kind: "rename-mod"; modId: string; name: string }
   | { kind: "update-links"; links: UpdateLink[] }
   | { kind: "disable-mod"; modId: string; name: string; dependents: string[] }
+  | { kind: "preflight"; items: PreflightItem[] }
   | null;
 
 function describeReport(r: DeployReport): string {
@@ -179,7 +181,18 @@ export function GameView({
     return report;
   };
 
-  const play = async () => {
+  const play = async (checked = false) => {
+    if (!checked) {
+      const preflight = await run("Checking mods", () => api.preflight(id));
+      if (!preflight) return;
+      const errors = preflight.items.filter((i) => i.severity === "Error");
+      if (errors.length) {
+        setDialog({ kind: "preflight", items: preflight.items });
+        return;
+      }
+      const warnings = preflight.items.filter((i) => i.severity === "Warning" && i.action.action !== "Apply");
+      if (warnings.length) toast("info", "Starting, but note", warnings.map((w) => w.title).join("\n"));
+    }
     if (loadout?.pending_changes && !(await apply())) return;
     const launched = await run("Launching", async () => {
       await api.launchGame(id, true);
@@ -310,7 +323,7 @@ export function GameView({
                 </button>
               </div>
             </details>
-            <button className="play" onClick={play} disabled={!!busy}>
+            <button className="play" onClick={() => void play()} disabled={!!busy}>
               <Icon name="play" size={18} />
               {busy === "Launching" ? "Starting…" : loadout?.pending_changes ? "Apply & Play" : "Play"}
             </button>
@@ -861,6 +874,51 @@ export function GameView({
           onClose={() => setDialog(null)}
         />
       )}
+      {dialog?.kind === "preflight" && (
+        <Dialog
+          title="Some mods won't work"
+          onClose={() => setDialog(null)}
+          actions={
+            <>
+              <button onClick={() => setDialog(null)}>Cancel</button>
+              <button
+                className="danger"
+                onClick={() => {
+                  setDialog(null);
+                  void play(true);
+                }}
+              >
+                Launch anyway
+              </button>
+            </>
+          }
+        >
+          <ul className="preflight-list">
+            {dialog.items.map((item, i) => (
+              <li key={i} className={item.severity === "Error" ? "error" : "warning"}>
+                <Icon name="alert" size={14} />
+                <div>
+                  <strong>{item.title}</strong>
+                  <p className="muted small">{item.detail}</p>
+                </div>
+                <PreflightButton
+                  item={item}
+                  gameDomain={domain ?? null}
+                  onDone={() => setDialog(null)}
+                  onFixDlls={fixDlls}
+                  onEnable={enableMod}
+                  onShowMod={(modId) => {
+                    setTab("mods");
+                    setSelected(modId);
+                  }}
+                  onApply={async () => void (await apply())}
+                  onChoose={async (token) => enqueueFomod(await api.getFomod(token))}
+                />
+              </li>
+            ))}
+          </ul>
+        </Dialog>
+      )}
       {dialog?.kind === "disable-mod" && (
         <ConfirmDialog
           title={`Disable ${dialog.name}?`}
@@ -899,4 +957,51 @@ export function GameView({
       )}
     </div>
   );
+}
+
+/** The fix a preflight item offers, as a button. */
+function PreflightButton({
+  item,
+  gameDomain,
+  onDone,
+  onFixDlls,
+  onEnable,
+  onShowMod,
+  onApply,
+  onChoose,
+}: {
+  item: PreflightItem;
+  gameDomain: string | null;
+  onDone: () => void;
+  onFixDlls: () => Promise<void>;
+  onEnable: (modId: string) => Promise<void>;
+  onShowMod: (modId: string) => void;
+  onApply: () => Promise<void>;
+  onChoose: (token: string) => Promise<void>;
+}) {
+  const a = item.action;
+  const run = (work: () => Promise<void> | void) => () => {
+    onDone();
+    void work();
+  };
+  switch (a.action) {
+    case "FixDllOverrides":
+      return <button className="small" onClick={run(onFixDlls)}>Fix</button>;
+    case "EnableMod":
+      return <button className="small" onClick={run(() => onEnable(a.mod_id))}>Enable</button>;
+    case "ShowMod":
+      return <button className="small" onClick={run(() => onShowMod(a.mod_id))}>Show</button>;
+    case "Apply":
+      return <button className="small" onClick={run(onApply)}>Apply</button>;
+    case "ChooseOptions":
+      return <button className="small" onClick={run(() => onChoose(a.token))}>Choose</button>;
+    case "OpenNexus":
+      return gameDomain ? (
+        <button className="small" onClick={() => openExternal(nexusUrls.modPage(gameDomain, a.nexus_mod_id))}>
+          <Icon name="external" /> Get
+        </button>
+      ) : null;
+    case "None":
+      return null;
+  }
 }

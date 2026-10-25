@@ -18,6 +18,7 @@ use mm_core::library::{
     Prepared, ProfileExport,
 };
 use mm_core::nexus::{self, Download, NexusClient, NexusUser, RateLimits};
+use mm_core::preflight::Preflight;
 use mm_core::requirements::FrameworkState;
 use mm_core::saves::{BackupReason, SaveBackup};
 use mm_core::updates::{self, ChangelogVersion, UpdateSummary};
@@ -1107,6 +1108,16 @@ pub async fn cancel_fomod(app: AppHandle, token: String) -> CommandResult<()> {
             });
         }
         Ok(())
+    })
+    .await
+}
+
+/// What would keep mods from working if the game started now.
+#[tauri::command]
+pub async fn preflight(app: AppHandle, instance_id: String) -> CommandResult<Preflight> {
+    blocking(app, move |_, state| {
+        let (instance, game, _) = state.resolve(&instance_id)?;
+        lock(&state.library).preflight(game, &instance).map_err(err)
     })
     .await
 }
