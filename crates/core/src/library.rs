@@ -2064,9 +2064,7 @@ impl Library {
                 continue;
             };
             let provider = match &status.state {
-                FrameworkState::Installed { mod_name } => {
-                    mods.values().find(|m| &m.name == mod_name)
-                }
+                FrameworkState::Installed { mod_id, .. } => mods.get(mod_id),
                 _ => None,
             };
             let binary = framework.provides.iter().find_map(|p| {
@@ -2125,9 +2123,9 @@ impl Library {
                 // Known versions settle it; the heuristic is for the rest.
                 .filter(|f| f.version.is_none() || f.min_version.is_none())
                 .filter_map(|f| match &f.state {
-                    FrameworkState::Installed { mod_name } => mods
-                        .values()
-                        .find(|m| &m.name == mod_name && m.installed_at < updated)
+                    FrameworkState::Installed { mod_id, .. } => mods
+                        .get(mod_id)
+                        .filter(|m| m.installed_at < updated)
                         .map(|_| f.name.clone()),
                     _ => None,
                 })

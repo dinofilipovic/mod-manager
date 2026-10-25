@@ -879,7 +879,7 @@ export function GameView({
           title={`Remove ${dialog.name}?`}
           message={
             (mods.find((m) => m.mod.id === dialog.modId)?.required_by.length
-              ? `${mods.find((m) => m.mod.id === dialog.modId)!.required_by.join(", ")} need${
+              ? `In this profile, ${mods.find((m) => m.mod.id === dialog.modId)!.required_by.join(", ")} need${
                   mods.find((m) => m.mod.id === dialog.modId)!.required_by.length === 1 ? "s" : ""
                 } it and won't work without it. `
               : "") +

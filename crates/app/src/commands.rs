@@ -18,6 +18,7 @@ use mm_core::library::{
     Prepared, ProfileExport,
 };
 use mm_core::nexus::{self, Download, NexusClient, NexusUser, RateLimits};
+use mm_core::requirements::FrameworkState;
 use mm_core::saves::{BackupReason, SaveBackup};
 use mm_core::updates::{self, ChangelogVersion, UpdateSummary};
 use mm_core::{GameDefinition, ScanResult};
@@ -1156,7 +1157,7 @@ pub fn fetch_requirements_for(
     if automatic {
         nexus::check_budget(mm_core::library::now()).map_err(err)?;
     }
-    let ids: Vec<u32> = match only {
+    let mut ids: Vec<u32> = match only {
         Some(ids) => ids.to_vec(),
         None => lock(&state.library)
             .requirement_targets(&game.id, refresh)
@@ -1165,6 +1166,9 @@ pub fn fetch_requirements_for(
             .map(|(_, id)| id)
             .collect(),
     };
+    // Several files of one Nexus mod share its requirements.
+    ids.sort_unstable();
+    ids.dedup();
     if ids.is_empty() {
         return Ok(0);
     }
@@ -1231,31 +1235,64 @@ pub async fn get_missing(app: AppHandle, instance_id: String) -> CommandResult<U
             .clone()
             .ok_or("This game isn't on Nexus Mods.")?;
         let current = loadout(state, &instance_id)?;
-        let mut wanted: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+        // Nexus mod id -> name, and the installed mod a newer one replaces.
+        let mut wanted: std::collections::BTreeMap<u32, (String, Option<String>)> =
+            std::collections::BTreeMap::new();
         for m in current.mods.iter().filter(|m| m.enabled) {
             for d in m.requires.iter().filter(|d| d.is_unmet()) {
                 // Disabled ones only need enabling.
                 if matches!(d.state, DependencyState::Disabled { .. }) {
                     continue;
                 }
-                if let Some(id) = d.nexus_mod_id {
-                    wanted.entry(id).or_insert_with(|| d.name.clone());
-                }
+                let Some(id) = d.nexus_mod_id else { continue };
+                // Something too old is updated, not installed a second time.
+                let replaces = if matches!(d.state, DependencyState::TooOld { .. }) {
+                    current
+                        .frameworks
+                        .iter()
+                        .find_map(|f| match &f.state {
+                            FrameworkState::Installed { mod_id, .. }
+                                if f.nexus_mod_id == Some(id) =>
+                            {
+                                Some(mod_id.clone())
+                            }
+                            _ => None,
+                        })
+                        .or_else(|| {
+                            current
+                                .mods
+                                .iter()
+                                .find(|x| x.enabled && x.record.nexus_mod_id == Some(id))
+                                .map(|x| x.record.id.clone())
+                        })
+                } else {
+                    None
+                };
+                wanted
+                    .entry(id)
+                    .or_insert_with(|| (d.name.clone(), replaces));
             }
         }
-        let key = nexus::api_key::load()
-            .map_err(err)?
-            .ok_or("Connect your Nexus Mods account in Settings first.")?;
-        let client = nexus_client(&key)?;
-        let premium = client.validate().map_err(err)?.is_premium;
+        // Without an account (or a Premium one) the pages are the way.
+        let premium = match nexus::api_key::load().ok().flatten() {
+            Some(key) => nexus_client(&key)?
+                .validate()
+                .map(|u| u.is_premium)
+                .unwrap_or(false),
+            None => false,
+        };
+        let client = match nexus::api_key::load().ok().flatten() {
+            Some(key) if premium => Some(nexus_client(&key)?),
+            _ => None,
+        };
         let mut result = UpdateAllResult {
             queued: 0,
             links: Vec::new(),
         };
-        for (nexus_mod, name) in wanted {
-            let main = premium
-                .then(|| client.mod_files(&domain, nexus_mod).ok())
-                .flatten()
+        for (nexus_mod, (name, replaces)) in wanted {
+            let main = client
+                .as_ref()
+                .and_then(|c| c.mod_files(&domain, nexus_mod).ok())
                 .and_then(|files| {
                     files
                         .files
@@ -1273,7 +1310,7 @@ pub async fn get_missing(app: AppHandle, instance_id: String) -> CommandResult<U
                             file_id: file.file_id,
                             key: None,
                             expires: None,
-                            replaces: None,
+                            replaces,
                         },
                     )?;
                     result.queued += 1;

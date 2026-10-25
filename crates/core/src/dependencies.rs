@@ -166,7 +166,8 @@ pub struct DependencyReport {
 }
 
 /// Checks every requirement: the recorded ones (`recorded`) and the
-/// frameworks each enabled mod needs by the game's rules (`needs`).
+/// frameworks each mod needs by the game's rules (`needs`). The same thing
+/// required from several sources is listed once.
 pub fn resolve(
     game: &GameDefinition,
     mods: &[ModNode],
@@ -175,45 +176,82 @@ pub fn resolve(
     needs: &BTreeMap<String, Vec<String>>,
 ) -> DependencyReport {
     let by_id: HashMap<&str, &ModNode> = mods.iter().map(|m| (m.id, m)).collect();
-    let mut all: Vec<Dependency> = recorded.to_vec();
-    for (mod_id, wanted) in needs {
-        for framework in wanted {
-            let already = all.iter().any(|d| {
-                d.mod_id == *mod_id && d.kind == DependencyKind::Framework && d.target == *framework
-            });
-            if !already {
-                all.push(Dependency {
-                    mod_id: mod_id.clone(),
-                    kind: DependencyKind::Framework,
-                    target: framework.clone(),
-                    min_version: None,
-                    optional: false,
-                    source: DependencySource::Toml,
-                    notes: None,
-                    url: None,
-                });
+    // A Nexus mod that is one of the game's frameworks is that framework.
+    let normalize = |mut d: Dependency| {
+        if d.kind == DependencyKind::NexusMod
+            && let Some(f) = d
+                .target
+                .parse::<u32>()
+                .ok()
+                .and_then(|id| game.frameworks.iter().find(|f| f.nexus_mod_id == Some(id)))
+        {
+            d.kind = DependencyKind::Framework;
+            d.target = f.id.clone();
+        }
+        d
+    };
+    let rules = needs.iter().flat_map(|(mod_id, wanted)| {
+        wanted.iter().map(move |framework| Dependency {
+            mod_id: mod_id.clone(),
+            kind: DependencyKind::Framework,
+            target: framework.clone(),
+            min_version: None,
+            optional: false,
+            source: DependencySource::Toml,
+            notes: None,
+            url: None,
+        })
+    });
+    // The user's word first, then Nexus, then the rules; required if any says so.
+    let mut all: Vec<Dependency> = Vec::new();
+    let mut sorted: Vec<Dependency> = recorded
+        .iter()
+        .cloned()
+        .map(normalize)
+        .chain(rules)
+        .collect();
+    sorted.sort_by_key(|d| match d.source {
+        DependencySource::User => 0,
+        DependencySource::Nexus => 1,
+        DependencySource::Toml => 2,
+    });
+    for d in sorted {
+        match all.iter_mut().find(|a| {
+            a.mod_id == d.mod_id && a.kind == d.kind && a.target.eq_ignore_ascii_case(&d.target)
+        }) {
+            Some(existing) => {
+                existing.optional &= d.optional;
+                existing.min_version = existing.min_version.take().or(d.min_version);
+                existing.notes = existing.notes.take().or(d.notes);
+                existing.url = existing.url.take().or(d.url);
             }
+            None => all.push(d),
         }
     }
 
     let mut report = DependencyReport::default();
-    // Edges between enabled mods, for "required by" and cycles.
+    // Edges between enabled mods where one is the only thing meeting the
+    // other's requirement: for "required by" and cycles.
     let mut edges: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut wanted_disabled: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for dep in &all {
         let Some(owner) = by_id.get(dep.mod_id.as_str()) else {
             continue;
         };
-        let (status, providers) = check(game, mods, frameworks, dep);
+        let (status, providers) = check(game, mods, frameworks, dep, owner.id);
         // A mod doesn't need itself (a framework's own files match its rule).
         if providers.contains(&owner.id) {
             continue;
         }
-        if owner.enabled {
-            for p in providers
-                .iter()
-                .filter(|p| by_id.get(*p).is_some_and(|m| m.enabled))
-            {
-                edges.entry(owner.id).or_default().insert(p);
+        if owner.enabled && !dep.optional {
+            if let [only] = providers.as_slice() {
+                edges.entry(owner.id).or_default().insert(only);
+            }
+            if let DependencyState::Disabled { mod_id, .. } = &status.state {
+                wanted_disabled
+                    .entry(mod_id.clone())
+                    .or_default()
+                    .insert(owner.name.to_string());
             }
         }
         report
@@ -231,18 +269,18 @@ pub fn resolve(
                 .push(by_id[owner].name.to_string());
         }
     }
+    // A disabled mod that enabled mods are waiting for is needed by them too.
+    for (mod_id, names) in wanted_disabled {
+        report.required_by.entry(mod_id).or_default().extend(names);
+    }
     report.cycles = cycles(&edges)
         .into_iter()
-        .map(|c| {
-            let mut names: Vec<String> =
-                c.into_iter().map(|id| by_id[id].name.to_string()).collect();
-            // Start at the first name alphabetically, keeping the order around the circle.
-            let first = names
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, n)| n.as_str())
-                .map(|(i, _)| i);
-            names.rotate_left(first.unwrap_or(0));
+        .map(|group| {
+            let mut names: Vec<String> = group
+                .into_iter()
+                .map(|id| by_id[id].name.to_string())
+                .collect();
+            names.sort();
             names
         })
         .collect();
@@ -256,6 +294,7 @@ fn check<'a>(
     mods: &'a [ModNode],
     frameworks: &[FrameworkStatus],
     dep: &Dependency,
+    owner: &str,
 ) -> (DependencyStatus, Vec<&'a str>) {
     let mut status = DependencyStatus {
         kind: dep.kind,
@@ -296,7 +335,7 @@ fn check<'a>(
                 have: f.version.clone().unwrap_or_default(),
                 need: f.min_version.clone().unwrap_or_default(),
             },
-            FrameworkState::Installed { mod_name } => {
+            FrameworkState::Installed { mod_name, .. } => {
                 too_old(f.version.as_deref(), dep.min_version.as_deref()).unwrap_or(
                     DependencyState::Satisfied {
                         by: mod_name.clone(),
@@ -320,9 +359,11 @@ fn check<'a>(
     }
 
     let candidates: Vec<&ModNode> = match dep.kind {
+        // Another file of the mod's own Nexus page doesn't count.
         DependencyKind::NexusMod => {
             status.nexus_mod_id = dep.target.parse().ok();
             mods.iter()
+                .filter(|m| m.id != owner)
                 .filter(|m| m.nexus_mod_id.is_some() && m.nexus_mod_id == status.nexus_mod_id)
                 .collect()
         }
@@ -360,40 +401,63 @@ fn too_old(have: Option<&str>, need: Option<&str>) -> Option<DependencyState> {
     })
 }
 
-/// Every cycle in the graph, each once, starting at its smallest id.
+/// Groups of mods that need each other in a circle: the strongly connected
+/// components with more than one mod (Tarjan's algorithm, linear time).
 fn cycles<'a>(edges: &BTreeMap<&'a str, BTreeSet<&'a str>>) -> Vec<Vec<&'a str>> {
-    let mut found: BTreeSet<Vec<&str>> = BTreeSet::new();
-    fn walk<'a>(
-        node: &'a str,
-        edges: &BTreeMap<&'a str, BTreeSet<&'a str>>,
-        path: &mut Vec<&'a str>,
-        found: &mut BTreeSet<Vec<&'a str>>,
-    ) {
-        if let Some(start) = path.iter().position(|n| *n == node) {
-            let mut cycle = path[start..].to_vec();
-            let min = cycle
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, n)| **n)
-                .map(|(i, _)| i);
-            cycle.rotate_left(min.unwrap_or(0));
-            found.insert(cycle);
-            return;
-        }
-        // Long chains can't hide a cycle shorter than the mod count.
-        if path.len() > edges.len() {
-            return;
-        }
-        path.push(node);
-        for next in edges.get(node).into_iter().flatten() {
-            walk(next, edges, path, found);
-        }
-        path.pop();
+    struct Tarjan<'a, 'e> {
+        edges: &'e BTreeMap<&'a str, BTreeSet<&'a str>>,
+        index: HashMap<&'a str, usize>,
+        low: HashMap<&'a str, usize>,
+        stack: Vec<&'a str>,
+        on_stack: BTreeSet<&'a str>,
+        groups: Vec<Vec<&'a str>>,
     }
-    for node in edges.keys() {
-        walk(node, edges, &mut Vec::new(), &mut found);
+    impl<'a> Tarjan<'a, '_> {
+        fn visit(&mut self, node: &'a str) {
+            let i = self.index.len();
+            self.index.insert(node, i);
+            self.low.insert(node, i);
+            self.stack.push(node);
+            self.on_stack.insert(node);
+            for next in self.edges.get(node).into_iter().flatten().copied() {
+                if !self.index.contains_key(next) {
+                    self.visit(next);
+                    let low = self.low[node].min(self.low[next]);
+                    self.low.insert(node, low);
+                } else if self.on_stack.contains(next) {
+                    let low = self.low[node].min(self.index[next]);
+                    self.low.insert(node, low);
+                }
+            }
+            if self.low[node] == self.index[node] {
+                let mut group = Vec::new();
+                while let Some(member) = self.stack.pop() {
+                    self.on_stack.remove(member);
+                    group.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                if group.len() > 1 {
+                    self.groups.push(group);
+                }
+            }
+        }
     }
-    found.into_iter().collect()
+    let mut t = Tarjan {
+        edges,
+        index: HashMap::new(),
+        low: HashMap::new(),
+        stack: Vec::new(),
+        on_stack: BTreeSet::new(),
+        groups: Vec::new(),
+    };
+    for node in edges.keys().copied() {
+        if !t.index.contains_key(node) {
+            t.visit(node);
+        }
+    }
+    t.groups
 }
 
 /// The mod-page requirements of up to 50 mods per request (v2 API). The
@@ -463,16 +527,17 @@ struct NexusRequirement {
 /// id), as `nexus` dependencies with an empty `mod_id` to fill in. Off-site
 /// requirements and ones on another game's pages become `External`.
 pub fn parse_requirements(body: &str) -> crate::error::Result<BTreeMap<u32, Vec<Dependency>>> {
-    if let Some(message) = crate::collections::graphql_error(body) {
-        return Err(crate::error::Error::Nexus(message));
-    }
-    let response: RequirementsResponse = serde_json::from_str(body).map_err(|e| {
-        crate::error::Error::Nexus(format!("unexpected response from Nexus Mods: {e}"))
-    })?;
-    let nodes = response
-        .data
-        .map(|d| d.legacy_mods_by_domain.nodes)
-        .unwrap_or_default();
+    let response = serde_json::from_str::<RequirementsResponse>(body).ok();
+    // Errors about some mods (hidden, deleted) come with the others' data.
+    let nodes = match response.and_then(|r| r.data) {
+        Some(data) => data.legacy_mods_by_domain.nodes,
+        None => {
+            return Err(crate::error::Error::Nexus(
+                crate::collections::graphql_error(body)
+                    .unwrap_or_else(|| "unexpected response from Nexus Mods".into()),
+            ));
+        }
+    };
     Ok(nodes
         .into_iter()
         .map(|m| {
@@ -514,6 +579,7 @@ pub fn parse_requirements(body: &str) -> crate::error::Result<BTreeMap<u32, Vec<
 }
 
 /// Asks Nexus for the requirements of `mod_ids` (of one game), in batches.
+/// A failing batch doesn't lose the others; only when all fail is it an error.
 pub fn fetch_requirements(
     url: &str,
     api_key: Option<&str>,
@@ -522,21 +588,29 @@ pub fn fetch_requirements(
     app_version: &str,
 ) -> crate::error::Result<BTreeMap<u32, Vec<Dependency>>> {
     let mut all = BTreeMap::new();
+    let mut failure = None;
     for batch in mod_ids.chunks(REQUIREMENTS_BATCH) {
         let ids: Vec<serde_json::Value> = batch
             .iter()
             .map(|id| serde_json::json!({ "gameDomain": game_domain, "modId": id }))
             .collect();
-        let body = crate::collections::post_graphql(
+        let found = crate::collections::post_graphql(
             url,
             api_key,
             REQUIREMENTS_QUERY,
             serde_json::json!({ "ids": ids }),
             app_version,
-        )?;
-        all.extend(parse_requirements(&body)?);
+        )
+        .and_then(|body| parse_requirements(&body));
+        match found {
+            Ok(found) => all.extend(found),
+            Err(e) => failure = Some(e),
+        }
     }
-    Ok(all)
+    match failure {
+        Some(e) if all.is_empty() && !mod_ids.is_empty() => Err(e),
+        _ => Ok(all),
+    }
 }
 
 #[cfg(test)]
@@ -702,9 +776,10 @@ mod tests {
             &DependencyState::Unverifiable
         );
         assert_eq!(report.required_by["old"], ["hud"]);
-        assert!(
-            !report.required_by.contains_key("lib"),
-            "disabled mods aren't needed by anything yet"
+        assert_eq!(
+            report.required_by["lib"],
+            ["hud"],
+            "removing a disabled mod others wait for warns too"
         );
     }
 
@@ -780,12 +855,76 @@ mod tests {
     }
 
     #[test]
+    fn the_same_requirement_from_several_sources_is_listed_once() {
+        let mut lib = Lib { mods: Vec::new() };
+        // A RED4ext plugin needs RED4ext by the game's rules, and its Nexus
+        // page says so too.
+        lib.add("plugin", "1", Some(5), true, &["red4ext/plugins/P/P.dll"]);
+        let report = lib.resolve(&[nexus("plugin", 2380)]);
+        let red4ext: Vec<_> = report.requires["plugin"]
+            .iter()
+            .filter(|d| d.name == "RED4ext")
+            .collect();
+        assert_eq!(red4ext.len(), 1);
+        assert_eq!(
+            red4ext[0].source,
+            DependencySource::Nexus,
+            "the more specific source is shown"
+        );
+        assert_eq!(red4ext[0].state, DependencyState::Missing);
+    }
+
+    #[test]
+    fn a_second_provider_means_nobody_depends_on_either() {
+        let mut lib = Lib { mods: Vec::new() };
+        lib.add("plugin", "1", Some(5), true, &["red4ext/plugins/P/P.dll"]);
+        lib.add("r4a", "1", Some(2380), true, &["red4ext/RED4ext.dll"]);
+        lib.add("r4b", "1", Some(2380), true, &["red4ext/RED4ext.dll"]);
+        let report = lib.resolve(&[]);
+        assert!(
+            report.required_by.is_empty(),
+            "disabling either keeps RED4ext"
+        );
+        // A requirement on its own Nexus page doesn't resolve to itself.
+        let mut own = Lib { mods: Vec::new() };
+        own.add("main", "1", Some(9), true, &["a.archive"]);
+        let report = own.resolve(&[nexus("main", 9)]);
+        assert_eq!(report.requires["main"][0].state, DependencyState::Missing);
+    }
+
+    #[test]
+    fn partial_errors_keep_the_other_mods() {
+        let body = r#"{"errors":[{"message":"Mod not found","extensions":{"code":"NOT_FOUND"}}],
+            "data":{"legacyModsByDomain":{"nodes":[{"modId":5,"gameId":3333,"modRequirements":
+            {"nexusRequirements":{"nodes":[{"modId":"2380","modName":"RED4ext","gameId":"3333",
+            "externalRequirement":false,"notes":null,"url":null}]}}}]}}}"#;
+        let found = parse_requirements(body).unwrap();
+        assert_eq!(found[&5][0].target, "2380");
+        assert!(parse_requirements(r#"{"errors":[{"message":"boom"}],"data":null}"#).is_err());
+    }
+
+    #[test]
     fn finds_cycles() {
         let mut lib = Lib { mods: Vec::new() };
         lib.add("a", "1", Some(1), true, &["a.archive"]);
         lib.add("b", "1", Some(2), true, &["b.archive"]);
         lib.add("c", "1", Some(3), true, &["c.archive"]);
         let report = lib.resolve(&[nexus("a", 2), nexus("b", 3), nexus("c", 1), nexus("b", 1)]);
-        assert_eq!(report.cycles, [vec!["a", "b"], vec!["a", "b", "c"]]);
+        assert_eq!(
+            report.cycles,
+            [vec!["a", "b", "c"]],
+            "one group, however many circles"
+        );
+
+        // A long chain without a circle is cheap and reports nothing.
+        let mut chain = Lib { mods: Vec::new() };
+        let mut deps = Vec::new();
+        for i in 0..300u32 {
+            chain.add(&format!("m{i}"), "1", Some(i + 1), true, &[]);
+            for j in i + 1..(i + 6).min(300) {
+                deps.push(nexus(&format!("m{i}"), j + 1));
+            }
+        }
+        assert!(chain.resolve(&deps).cycles.is_empty());
     }
 }

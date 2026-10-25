@@ -24,6 +24,7 @@ pub struct ModFiles<'a> {
 pub enum FrameworkState {
     /// An enabled mod provides it.
     Installed {
+        mod_id: String,
         mod_name: String,
     },
     /// Its files are in the game folder but weren't placed by this app.
@@ -77,8 +78,8 @@ pub struct Analysis {
     pub frameworks: Vec<FrameworkStatus>,
     /// Missing requirements per enabled mod id.
     pub missing: BTreeMap<String, Vec<MissingRequirement>>,
-    /// The frameworks each enabled mod needs (directly or through another
-    /// framework), by id.
+    /// The frameworks each mod needs (directly or through another
+    /// framework), by id; disabled mods too.
     pub needs: BTreeMap<String, Vec<String>>,
 }
 
@@ -97,9 +98,10 @@ pub fn analyze(
     mods: &[ModFiles],
     installed_manually: impl Fn(&Framework) -> bool,
 ) -> Analysis {
-    // What each enabled mod needs, including what its own frameworks need.
-    let mut needs: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-    for m in mods.iter().filter(|m| m.enabled) {
+    // What each mod needs, including what its own frameworks need. Only
+    // enabled mods count for what is missing; disabled ones still show theirs.
+    let mut all_needs: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for m in mods {
         let own: BTreeSet<&str> = game
             .frameworks
             .iter()
@@ -131,8 +133,13 @@ pub fn analyze(
             }
         }
         wanted.retain(|id| !own.contains(id));
-        needs.insert(m.id, wanted);
+        all_needs.insert(m.id, wanted);
     }
+    let needs: BTreeMap<&str, BTreeSet<&str>> = all_needs
+        .iter()
+        .filter(|(id, _)| mods.iter().any(|m| m.id == **id && m.enabled))
+        .map(|(id, wanted)| (*id, wanted.clone()))
+        .collect();
 
     let frameworks: Vec<FrameworkStatus> = game
         .frameworks
@@ -142,6 +149,7 @@ pub fn analyze(
             let disabled = mods.iter().find(|m| !m.enabled && provides(f, m.files));
             let state = match (enabled, disabled) {
                 (Some(m), _) => FrameworkState::Installed {
+                    mod_id: m.id.to_string(),
                     mod_name: m.name.to_string(),
                 },
                 _ if installed_manually(f) => FrameworkState::InstalledManually,
@@ -169,7 +177,7 @@ pub fn analyze(
         })
         .collect();
 
-    let needs_by_mod = needs
+    let needs_by_mod = all_needs
         .iter()
         .map(|(id, wanted)| {
             (
@@ -269,6 +277,7 @@ mod tests {
         assert_eq!(
             state("cet"),
             FrameworkState::Installed {
+                mod_id: "cet".into(),
                 mod_name: "CET".into()
             }
         );

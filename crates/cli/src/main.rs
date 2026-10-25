@@ -346,7 +346,7 @@ fn print_health(loadout: &mm_core::library::Loadout, logs: &[mm_core::health::Lo
     println!("\nFrameworks:");
     for f in &loadout.frameworks {
         let state = match &f.state {
-            FrameworkState::Installed { mod_name } => format!("installed ({mod_name})"),
+            FrameworkState::Installed { mod_name, .. } => format!("installed ({mod_name})"),
             FrameworkState::InstalledManually => "installed manually".into(),
             FrameworkState::Disabled { mod_name, .. } => format!("disabled ({mod_name})"),
             FrameworkState::NotInstalled => "not installed".into(),

@@ -116,10 +116,22 @@ fn nexus_requirements_feed_the_profile() {
     let states: Vec<(String, &DependencyState)> = entry(&settings)
         .requires
         .iter()
-        .filter(|d| d.kind == DependencyKind::NexusMod)
+        .filter(|d| d.source == mm_core::dependencies::DependencySource::Nexus)
         .map(|d| (d.name.clone(), &d.state))
         .collect();
     assert_eq!(states.len(), 3);
+    let mut names: Vec<&str> = entry(&settings)
+        .requires
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    names.sort();
+    names.dedup();
+    assert_eq!(
+        names.len(),
+        entry(&settings).requires.len(),
+        "each requirement once"
+    );
     let state = |name: &str| states.iter().find(|(n, _)| n == name).unwrap().1;
     // RED4ext and ArchiveXL are installed; redscript isn't.
     assert!(matches!(

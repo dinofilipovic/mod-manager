@@ -205,7 +205,7 @@ pub fn post_graphql(
         return Err(match status.as_u16() {
             401 => Error::Nexus("Nexus Mods didn't accept this API key. Copy the whole Personal API Key from your Nexus account page and try again.".into()),
             403 => Error::Nexus(format!("Nexus Mods refused the request: {message}")),
-            404 => Error::Nexus("Collection not found.".into()),
+            404 => Error::Nexus("Not found on Nexus Mods.".into()),
             429 => Error::Network("Nexus Mods rate limit reached; try again later.".into()),
             code if status.is_server_error() => Error::Network(format!(
                 "Nexus Mods had a problem ({code}). Try again in a few minutes."
@@ -228,7 +228,14 @@ pub fn fetch_collection(
         "revision": link.revision,
         "domainName": link.game_domain,
     });
-    let text = post_graphql(&graphql_url(), api_key, QUERY, variables, app_version)?;
+    let text = post_graphql(&graphql_url(), api_key, QUERY, variables, app_version).map_err(
+        |e| match e {
+            Error::Nexus(m) if m == "Not found on Nexus Mods." => {
+                Error::Nexus("Collection not found.".into())
+            }
+            other => other,
+        },
+    )?;
     parse_collection_response(&text)
 }
 

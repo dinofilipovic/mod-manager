@@ -169,10 +169,10 @@ const loadout = (): Loadout => ({
   pending_changes: pending,
   deployed_at: now - 3600,
   frameworks: [
-    { id: "cet", name: "Cyber Engine Tweaks", nexus_mod_id: 107, state: { state: "Installed", mod_name: "Cyber Engine Tweaks" }, needed_by: ["Immersive HUD"], version: "1.35.0", min_version: "1.38.0", too_old: true },
-    { id: "red4ext", name: "RED4ext", nexus_mod_id: 2380, state: { state: "Installed", mod_name: "RED4ext" }, needed_by: ["ArchiveXL"], version: "1.27.0", min_version: null, too_old: false },
+    { id: "cet", name: "Cyber Engine Tweaks", nexus_mod_id: 107, state: { state: "Installed", mod_id: "cet", mod_name: "Cyber Engine Tweaks" }, needed_by: ["Immersive HUD"], version: "1.35.0", min_version: "1.38.0", too_old: true },
+    { id: "red4ext", name: "RED4ext", nexus_mod_id: 2380, state: { state: "Installed", mod_id: "red4ext", mod_name: "RED4ext" }, needed_by: ["ArchiveXL"], version: "1.27.0", min_version: null, too_old: false },
     { id: "redscript", name: "redscript", nexus_mod_id: 1511, state: { state: "NotInstalled" }, needed_by: ["Immersive HUD"], version: null, min_version: null, too_old: false },
-    { id: "archivexl", name: "ArchiveXL", nexus_mod_id: 4198, state: { state: "Installed", mod_name: "ArchiveXL" }, needed_by: [], version: "1.28.0", min_version: "1.28.0", too_old: false },
+    { id: "archivexl", name: "ArchiveXL", nexus_mod_id: 4198, state: { state: "Installed", mod_id: "archivexl", mod_name: "ArchiveXL" }, needed_by: [], version: "1.28.0", min_version: "1.28.0", too_old: false },
     { id: "tweakxl", name: "TweakXL", nexus_mod_id: 4197, state: { state: "NotInstalled" }, needed_by: [], version: null, min_version: null, too_old: false },
   ],
   game: {
