@@ -53,6 +53,12 @@ fn main() {
             library.load_rate_limits();
             app.manage(AppState::new(library, games));
             downloads::start_workers(app.handle());
+            let handle = app.handle().clone();
+            // After the window is up; the keychain may ask first.
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                commands::check_updates_at_startup(&handle);
+            });
 
             #[cfg(any(target_os = "linux", windows))]
             if let Err(e) = app.deep_link().register_all() {
@@ -110,6 +116,9 @@ fn main() {
             commands::ignore_update,
             commands::update_all,
             commands::nexus_rate_limits,
+            commands::update_counts,
+            commands::auto_update_check,
+            commands::set_auto_update_check,
             commands::update_mod,
             commands::get_fomod,
             commands::fomod_state,

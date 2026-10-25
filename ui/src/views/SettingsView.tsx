@@ -33,6 +33,7 @@ export function SettingsView({
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [archives, setArchives] = useState<ArchivesInfo | null>(null);
   const [limits, setLimits] = useState<RateLimits | null>(null);
+  const [autoCheck, setAutoCheck] = useState<boolean | null>(null);
   const [archiveBusy, setArchiveBusy] = useState<string | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [, tick] = useState(0);
@@ -41,6 +42,7 @@ export function SettingsView({
     void api.appInfo().then(setInfo);
     api.archivesInfo().then(setArchives, (e) => setArchiveError(errorMessage(e)));
     api.nexusRateLimits().then(setLimits, () => setLimits(null));
+    api.autoUpdateCheck().then(setAutoCheck, () => setAutoCheck(null));
   }, []);
 
   const archiveAction = async (label: string, work: () => Promise<void>) => {
@@ -132,6 +134,24 @@ export function SettingsView({
               </div>
             )}
             {limits && <RateLimitsLine limits={limits} />}
+            {autoCheck !== null && (
+              <label className="toggle-inline field-row">
+                <input
+                  type="checkbox"
+                  checked={autoCheck}
+                  onChange={async (e) => {
+                    const on = e.target.checked;
+                    try {
+                      await api.setAutoUpdateCheck(on);
+                      setAutoCheck(on);
+                    } catch (err) {
+                      toast("error", "Couldn't change the setting", errorMessage(err));
+                    }
+                  }}
+                />
+                Check for mod updates automatically: once a day when the app starts, and after a game update
+              </label>
+            )}
             <div className="account-row">
               <span className="avatar connected large">{nexus.user.name.slice(0, 1).toUpperCase()}</span>
               <div>

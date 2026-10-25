@@ -26,6 +26,7 @@ export function App() {
   const [scanning, setScanning] = useState(true);
   const [view, setView] = useState<View | null>(null);
   const [downloads, setDownloads] = useState<Download[]>([]);
+  const [updateCounts, setUpdateCounts] = useState<Record<string, number>>({});
   const [nexus, setNexus] = useState<NexusStatus | null>(null);
   const updater = useUpdater();
 
@@ -56,8 +57,14 @@ export function App() {
     void api.appInfo().then((info) => {
       for (const warning of info.warnings) toast("error", "Something needs attention", warning);
     });
+    const refreshCounts = () => api.updateCounts().then(setUpdateCounts, () => {});
+    void refreshCounts();
     const unlisten = [
       events.downloadsChanged(setDownloads),
+      events.libraryChanged(() => void refreshCounts()),
+      events.updatesFound(({ game, available }) =>
+        toast("info", `${available === 1 ? "1 mod update" : `${available} mod updates`} for ${game}`, "Open the game to update."),
+      ),
       events.nxmError((message) => toast("error", "Couldn't start the download", message)),
       events.openCollection((link) => setView({ kind: "collections", link })),
     ];
@@ -116,6 +123,7 @@ export function App() {
         activeDownloads={activeDownloads}
         nexus={nexus}
         updateAvailable={updater.available?.version ?? null}
+        updateCounts={updateCounts}
       />
       <main className="content">
         {view?.kind === "downloads" ? (

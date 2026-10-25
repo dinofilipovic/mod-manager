@@ -324,6 +324,12 @@ export function installDevMock() {
               },
             ],
           };
+        case "update_counts":
+          return { cyberpunk2077: mods.filter((m) => m.mod.update_file_id && !m.mod.pinned).length };
+        case "auto_update_check":
+          return true;
+        case "set_auto_update_check":
+          return null;
         case "nexus_rate_limits":
           return {
             hourly_limit: 100,

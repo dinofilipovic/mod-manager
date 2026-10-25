@@ -13,6 +13,7 @@ export function Sidebar({
   activeDownloads,
   nexus,
   updateAvailable,
+  updateCounts,
 }: {
   scan: ScanResult | null;
   scanning: boolean;
@@ -22,6 +23,8 @@ export function Sidebar({
   activeDownloads: number;
   nexus: NexusStatus | null;
   updateAvailable: string | null;
+  /** Mods with an update waiting, per game id. */
+  updateCounts: Record<string, number>;
 }) {
   const envName = (id: string) => scan?.environments.find((e) => e.id === id)?.name ?? id;
   return (
@@ -58,6 +61,11 @@ export function Sidebar({
                 </small>
               </span>
               {needsSetup && <span className="dot warn" title="Setup needed" />}
+              {!needsSetup && (updateCounts[instance.game_id] ?? 0) > 0 && (
+                <span className="count" title="Mod updates available">
+                  {updateCounts[instance.game_id]}
+                </span>
+              )}
             </button>
           );
         })}

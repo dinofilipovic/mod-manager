@@ -838,6 +838,42 @@ impl Library {
         Ok(found)
     }
 
+    /// Whether mods are checked for updates on their own (on unless turned off).
+    pub fn auto_update_check(&self) -> bool {
+        !matches!(self.store.setting("auto_update_check"), Ok(Some(v)) if v == "off")
+    }
+
+    pub fn set_auto_update_check(&self, on: bool) -> Result<()> {
+        self.store
+            .set_setting("auto_update_check", (!on).then_some("off"))
+    }
+
+    /// Whether an automatic check of this game is due: on, and not checked
+    /// in the last day.
+    pub fn update_check_due(&self, game_id: &str, now: i64) -> bool {
+        self.auto_update_check()
+            && self
+                .last_update_check(game_id)
+                .is_none_or(|last| now - last >= 86_400)
+    }
+
+    /// Mods with an update waiting (not pinned), per game.
+    pub fn update_counts(&self) -> Result<BTreeMap<String, u32>> {
+        let mut counts = BTreeMap::new();
+        for game in crate::game::builtin_games().unwrap_or_default() {
+            let n = self
+                .store
+                .mods_for_game(&game.id)?
+                .iter()
+                .filter(|m| m.update_file_id.is_some() && !m.pinned)
+                .count() as u32;
+            if n > 0 {
+                counts.insert(game.id, n);
+            }
+        }
+        Ok(counts)
+    }
+
     /// Remembers that Nexus didn't know a mod, so it isn't asked again for a week.
     pub fn mark_lookup_failed(&self, mod_id: &str) -> Result<()> {
         self.store.set_setting(

@@ -154,10 +154,94 @@ pub async fn scan(app: AppHandle) -> CommandResult<ScanResult> {
 
 #[tauri::command]
 pub async fn get_loadout(app: AppHandle, instance_id: String) -> LoadoutResult {
-    blocking(app, move |_, state| {
-        let (instance, _, _) = state.resolve(&instance_id)?;
+    blocking(app, move |app, state| {
+        let (instance, game, _) = state.resolve(&instance_id)?;
         lock(&state.current_instance).insert(instance.game_id.clone(), instance.id.clone());
-        loadout(state, &instance_id)
+        let loadout = loadout(state, &instance_id)?;
+        // A game update was just noticed: mods may need updates too.
+        let previous =
+            lock(&state.seen_game_updates).insert(instance.id.clone(), loadout.game.updated_at);
+        if previous.is_some_and(|p| p != loadout.game.updated_at)
+            && lock(&state.library).auto_update_check()
+        {
+            spawn_update_check(app, game.clone());
+        }
+        Ok(loadout)
+    })
+    .await
+}
+
+/// Sent after an automatic update check found updates: `{ game, available }`.
+pub const UPDATES_FOUND: &str = "updates-found";
+
+/// Checks a game for mod updates in the background (once at a time per game).
+pub fn spawn_update_check(app: &AppHandle, game: GameDefinition) {
+    let state = app.state::<AppState>();
+    if !lock(&state.checking).insert(game.id.clone()) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        match run_update_check(&state, &game, true) {
+            Ok(summary) => {
+                let _ = app.emit(LIBRARY_CHANGED, ());
+                if summary.available > 0 {
+                    let _ = app.emit(
+                        UPDATES_FOUND,
+                        serde_json::json!({ "game": game.name, "available": summary.available }),
+                    );
+                }
+            }
+            Err(e) => eprintln!("automatic update check of {} skipped: {e}", game.id),
+        }
+        lock(&state.checking).remove(&game.id);
+    });
+}
+
+/// At startup: checks every detected game whose last check is a day old.
+pub fn check_updates_at_startup(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let scan = state.rescan();
+    let now = mm_core::library::now();
+    let mut games: Vec<GameDefinition> = Vec::new();
+    for instance in &scan.instances {
+        if let Ok(game) = state.game(&instance.game_id)
+            && !games.iter().any(|g| g.id == game.id)
+            && game.stores.nexus_domain.is_some()
+            && lock(&state.library).update_check_due(&game.id, now)
+        {
+            games.push(game.clone());
+        }
+    }
+    if games.is_empty() || !matches!(nexus::api_key::load(), Ok(Some(_))) {
+        return;
+    }
+    for game in games {
+        spawn_update_check(app, game);
+    }
+}
+
+/// Mods with a waiting update, per game id (for the sidebar).
+#[tauri::command]
+pub async fn update_counts(
+    app: AppHandle,
+) -> CommandResult<std::collections::BTreeMap<String, u32>> {
+    blocking(app, |_, state| {
+        lock(&state.library).update_counts().map_err(err)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn auto_update_check(app: AppHandle) -> CommandResult<bool> {
+    blocking(app, |_, state| Ok(lock(&state.library).auto_update_check())).await
+}
+
+#[tauri::command]
+pub async fn set_auto_update_check(app: AppHandle, on: bool) -> CommandResult<()> {
+    blocking(app, move |_, state| {
+        lock(&state.library).set_auto_update_check(on).map_err(err)
     })
     .await
 }

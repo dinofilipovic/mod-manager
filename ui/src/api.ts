@@ -87,6 +87,9 @@ export const api = {
     invoke<Loadout>("ignore_update", { instanceId, modId, ignore }),
   updateAll: (instanceId: string) => invoke<UpdateAllResult>("update_all", { instanceId }),
   nexusRateLimits: () => invoke<RateLimits | null>("nexus_rate_limits"),
+  updateCounts: () => invoke<Record<string, number>>("update_counts"),
+  autoUpdateCheck: () => invoke<boolean>("auto_update_check"),
+  setAutoUpdateCheck: (on: boolean) => invoke<void>("set_auto_update_check", { on }),
   updateMod: (modId: string) => invoke<string>("update_mod", { modId }),
 
   getFomod: (token: string) => invoke<FomodRequest>("get_fomod", { token }),
@@ -128,6 +131,8 @@ export const events = {
     listen<string>("nxm-error", (e) => fn(e.payload)),
   fomodRequested: (fn: (request: FomodRequest) => void): Promise<UnlistenFn> =>
     listen<FomodRequest>("fomod-requested", (e) => fn(e.payload)),
+  updatesFound: (fn: (found: { game: string; available: number }) => void): Promise<UnlistenFn> =>
+    listen<{ game: string; available: number }>("updates-found", (e) => fn(e.payload)),
   openCollection: (fn: (link: string) => void): Promise<UnlistenFn> =>
     listen<string>("open-collection", (e) => fn(e.payload)),
 };
