@@ -274,12 +274,19 @@ pub async fn import_archives(
                     },
                     None => (ModMeta::default(), None),
                 };
-                let prepared = lock(&state.library).prepare_archive(
+                // Copying, hashing and extracting happen without the library
+                // lock (each `lock` guard ends with its statement).
+                let job = lock(&state.library).begin_install(
                     game,
                     &PathBuf::from(&path),
                     meta,
                     Some(&instance_id),
                 );
+                let extracted = job.and_then(|job| job.extract(game));
+                let prepared = match extracted {
+                    Ok(extracted) => lock(&state.library).complete_install(game, extracted),
+                    Err(e) => Err(e),
+                };
                 match prepared {
                     Ok(Prepared::Installed(mut outcome)) => {
                         outcome.warnings.extend(lookup_note);
@@ -1014,9 +1021,19 @@ pub async fn finish_fomod(
             .map_err(err)?
             .game_id;
         let game = state.game(&game_id)?;
-        let outcome = lock(&state.library)
-            .finish_fomod(game, &token, &selections)
+        let job = lock(&state.library)
+            .take_fomod(&token, &selections)
             .map_err(err)?;
+        let staged = job.stage(game).map_err(err)?;
+        let outcome = match lock(&state.library)
+            .complete_install(game, mm_core::library::Extracted::Files(staged))
+            .map_err(err)?
+        {
+            Prepared::Installed(outcome) => outcome,
+            Prepared::NeedsChoices(_) => {
+                return Err("The installer asked again unexpectedly.".into());
+            }
+        };
         if let Some(download) = lock(&state.fomod_downloads).remove(&token) {
             let done = mm_core::nexus::DownloadStatus::Done {
                 mod_id: outcome.record.id.clone(),
@@ -1127,8 +1144,12 @@ pub async fn reinstall_mod(
 ) -> CommandResult<ReinstallResult> {
     blocking(app, move |app, state| {
         let (_, game, _) = state.resolve(&instance_id)?;
+        let job = lock(&state.library)
+            .reinstall_job(game, &mod_id, revision, Some(&instance_id), change_options)
+            .map_err(err)?;
+        let extracted = job.extract(game).map_err(err)?;
         let prepared = lock(&state.library)
-            .reinstall(game, &mod_id, revision, Some(&instance_id), change_options)
+            .complete_install(game, extracted)
             .map_err(err)?;
         let _ = app.emit(LIBRARY_CHANGED, ());
         Ok(prepared.into())
@@ -1144,8 +1165,12 @@ pub async fn rollback_mod(
 ) -> CommandResult<ReinstallResult> {
     blocking(app, move |app, state| {
         let (_, game, _) = state.resolve(&instance_id)?;
+        let job = lock(&state.library)
+            .rollback_job(game, &mod_id, Some(&instance_id))
+            .map_err(err)?;
+        let extracted = job.extract(game).map_err(err)?;
         let prepared = lock(&state.library)
-            .rollback(game, &mod_id, Some(&instance_id))
+            .complete_install(game, extracted)
             .map_err(err)?;
         let _ = app.emit(LIBRARY_CHANGED, ());
         Ok(prepared.into())

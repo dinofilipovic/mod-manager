@@ -3,6 +3,7 @@
 //! the library, so it continues after a restart; the rules (what runs next,
 //! retries) are in `mm_core::queue`.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use mm_core::archives::{ArchiveSource, Ingest};
@@ -212,13 +213,16 @@ fn run(app: &AppHandle, download: Download) -> Result<DownloadStatus, Error> {
                 }
                 !lock(&state.cancelled).contains(&download.id)
             })?;
-            // Kept in the archive store, so the mod can be reinstalled or rolled back.
-            let stored = lock(&state.library).store_archive(
-                &dest,
+            // Kept in the archive store, so the mod can be reinstalled or
+            // rolled back. Moving it there needs no library lock.
+            let root = lock(&state.library).root().to_path_buf();
+            let (hashes, relative) =
+                mm_core::archives::put(&root, &dest, Some(&file_name), Ingest::Move, Some(hashes))?;
+            let stored = lock(&state.library).record_archive(
+                hashes,
+                relative,
                 Some(&file_name),
                 ArchiveSource::Nexus,
-                Ingest::Move,
-                Some(hashes),
                 (Some(mod_id), Some(file_id)),
             )?;
             update(app, &download.id, |d| {
@@ -230,10 +234,9 @@ fn run(app: &AppHandle, download: Download) -> Result<DownloadStatus, Error> {
         }
     };
 
-    let mut library = lock(&state.library);
     // A download that is the pending update of an installed mod replaces it.
     let replaces = download.replaces.clone().or_else(|| {
-        library
+        lock(&state.library)
             .mods_for_game(&game.id)
             .ok()?
             .into_iter()
@@ -252,8 +255,18 @@ fn run(app: &AppHandle, download: Download) -> Result<DownloadStatus, Error> {
         archive_id: Some(archive_id),
         ..Default::default()
     };
-    let archive_path = library.downloads_dir().join(&file_name);
-    match library.prepare_archive(&game, &archive_path, meta, download.instance_id.as_deref())? {
+    // Extracting runs without the library lock; only the first and last
+    // steps take it.
+    let archive_path = PathBuf::from(&file_name);
+    let job = lock(&state.library).begin_install(
+        &game,
+        &archive_path,
+        meta,
+        download.instance_id.as_deref(),
+    )?;
+    let extracted = job.extract(&game)?;
+    let prepared = lock(&state.library).complete_install(&game, extracted)?;
+    match prepared {
         Prepared::Installed(outcome) => Ok(DownloadStatus::Done {
             mod_id: outcome.record.id,
             replaced_existing: outcome.replaced_existing,

@@ -205,13 +205,278 @@ pub struct Library {
 }
 
 struct PendingFomod {
-    game_id: String,
-    scratch: PathBuf,
+    job: InstallJob,
     content_root: PathBuf,
     installer: fomod::FomodInstaller,
-    meta: ModMeta,
+}
+
+/// An install between its first and last step (see `Library::begin_install`).
+pub struct InstallJob {
+    root: PathBuf,
+    game_id: String,
+    token: String,
+    /// Where the archive is extracted.
+    scratch: PathBuf,
+    archive: JobArchive,
     archive_name: Option<String>,
+    meta: ModMeta,
     instance_id: Option<String>,
+}
+
+enum JobArchive {
+    /// Already in the archive store.
+    Stored(ArchiveRecord),
+    /// The user's file, to clone or copy into the store.
+    New {
+        path: PathBuf,
+        original_name: Option<String>,
+    },
+}
+
+/// An archive in the store, recorded in the library or not yet.
+enum StoredArchive {
+    Recorded(i64),
+    Put {
+        hashes: Hashes,
+        relative: String,
+        original_name: Option<String>,
+        nexus: (Option<u32>, Option<u32>),
+    },
+}
+
+/// An extracted archive: files ready to record, or an installer waiting
+/// for the user's choices.
+pub enum Extracted {
+    Files(Staged),
+    Choices(ChoicesJob),
+}
+
+/// Files moved into a staging folder (and hashed), ready to swap in.
+pub struct Staged {
+    job: InstallJob,
+    archive: StoredArchive,
+    staging: PathBuf,
+    files: Vec<ModFile>,
+    size_bytes: u64,
+    plan: InstallPlan,
+    fomod_choices: Option<fomod::FomodChoices>,
+    replayed_choices: bool,
+}
+
+/// An extracted FOMOD archive whose installer needs the user's choices.
+pub struct ChoicesJob {
+    job: InstallJob,
+    archive: StoredArchive,
+    installer: fomod::FomodInstaller,
+    content_root: PathBuf,
+}
+
+/// A waiting installer taken out of the library with the user's choices.
+pub struct FomodJob {
+    pending: PendingFomod,
+    selections: fomod::Selections,
+}
+
+impl InstallJob {
+    /// The slow step: puts the archive in the store (copying and hashing
+    /// it), extracts it and stages the files. Needs no library.
+    pub fn extract(self, game: &GameDefinition) -> Result<Extracted> {
+        let (archive, path) = match &self.archive {
+            JobArchive::Stored(record) => (StoredArchive::Recorded(record.id), record.path.clone()),
+            JobArchive::New {
+                path,
+                original_name,
+            } => {
+                let (hashes, relative) = archives::put(
+                    &self.root,
+                    path,
+                    original_name.as_deref(),
+                    Ingest::Copy,
+                    None,
+                )?;
+                let archive = StoredArchive::Put {
+                    hashes,
+                    relative: relative.clone(),
+                    original_name: original_name.clone(),
+                    nexus: (self.meta.nexus_mod_id, self.meta.nexus_file_id),
+                };
+                (archive, relative)
+            }
+        };
+        let found = archive::extract(&self.root.join(path), &self.scratch)
+            .and_then(|()| fomod::find_installer(&self.scratch));
+        let installer = match found {
+            Ok(installer) => installer,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&self.scratch);
+                return Err(e);
+            }
+        };
+        let Some((installer, content_root)) = installer else {
+            let name = self
+                .meta
+                .name
+                .clone()
+                .unwrap_or_else(|| "Unnamed mod".into());
+            return match installer::plan_install(game, &self.scratch, &name) {
+                Ok(plan) => stage(self, archive, plan, None, false).map(Extracted::Files),
+                Err(e) => {
+                    let _ = fs::remove_dir_all(&self.scratch);
+                    Err(e)
+                }
+            };
+        };
+        // Same steps, groups and options as last time: no need to ask.
+        let replay = self
+            .meta
+            .fomod_choices
+            .as_ref()
+            .map(|choices| fomod::replay(&installer, choices))
+            .filter(|r| r.complete && !self.meta.ask_choices);
+        if let Some(replay) = replay {
+            let plan = match fomod_plan(
+                game,
+                &installer,
+                &content_root,
+                &self.scratch,
+                &replay.selections,
+            ) {
+                Ok(plan) => plan,
+                Err(e) => {
+                    let _ = fs::remove_dir_all(&self.scratch);
+                    return Err(e);
+                }
+            };
+            let choices = fomod::name_choices(&installer, &replay.selections);
+            return stage(self, archive, plan, Some(choices), true).map(Extracted::Files);
+        }
+        Ok(Extracted::Choices(ChoicesJob {
+            job: self,
+            archive,
+            installer,
+            content_root,
+        }))
+    }
+}
+
+impl FomodJob {
+    /// Stages the files the chosen options install. Needs no library.
+    pub fn stage(self, game: &GameDefinition) -> Result<Staged> {
+        let FomodJob {
+            pending,
+            selections,
+        } = self;
+        let plan = fomod_plan(
+            game,
+            &pending.installer,
+            &pending.content_root,
+            &pending.job.scratch,
+            &selections,
+        );
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&pending.job.scratch);
+                return Err(e);
+            }
+        };
+        let choices = fomod::name_choices(&pending.installer, &selections);
+        // Recorded when the installer started waiting.
+        let archive = StoredArchive::Recorded(pending.job.meta.archive_id.unwrap_or_default());
+        stage(pending.job, archive, plan, Some(choices), false)
+    }
+}
+
+/// The files a FOMOD installer's choices install, as an install plan whose
+/// sources are relative to `scratch`.
+fn fomod_plan(
+    game: &GameDefinition,
+    installer: &fomod::FomodInstaller,
+    content_root: &Path,
+    scratch: &Path,
+    selections: &fomod::Selections,
+) -> Result<InstallPlan> {
+    let mappings = fomod::resolve(installer, selections);
+    let pairs = fomod::expand(content_root, &mappings);
+    if pairs.is_empty() {
+        return Err(Error::Install(
+            "The chosen options don't install any files.".into(),
+        ));
+    }
+    let prefix = content_root
+        .strip_prefix(scratch)
+        .unwrap_or(Path::new(""))
+        .components()
+        .map(|c| format!("{}/", c.as_os_str().to_string_lossy()))
+        .collect::<String>();
+    let files: Vec<installer::PlannedFile> = pairs
+        .into_iter()
+        .map(|(source, target)| installer::PlannedFile {
+            source: format!("{prefix}{source}"),
+            target: installer::normalize_target(game, &target),
+        })
+        .collect();
+    let kinds: std::collections::BTreeSet<String> = files
+        .iter()
+        .filter_map(|f| game.layout_for(&f.target).map(|t| t.kind.clone()))
+        .collect();
+    Ok(InstallPlan {
+        files,
+        skipped: Vec::new(),
+        kinds: kinds.into_iter().collect(),
+        warnings: Vec::new(),
+    })
+}
+
+/// Moves the planned files from the extracted archive into a staging folder,
+/// hashing each so deploying and checking drift don't have to.
+fn stage(
+    job: InstallJob,
+    archive: StoredArchive,
+    plan: InstallPlan,
+    fomod_choices: Option<fomod::FomodChoices>,
+    replayed_choices: bool,
+) -> Result<Staged> {
+    let staging = job.root.join("tmp").join(format!("{}.staging", job.token));
+    let result = (|| {
+        let mut size_bytes = 0u64;
+        let mut files = Vec::with_capacity(plan.files.len());
+        for file in &plan.files {
+            let from = join_relative(&job.scratch, &file.source);
+            let to = join_relative(&staging, &file.target);
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+            }
+            fs::rename(&from, &to)
+                .or_else(|_| fs::copy(&from, &to).map(|_| ()))
+                .map_err(|e| Error::io(&to, e))?;
+            let size = fs::metadata(&to).map(|m| m.len()).unwrap_or(0);
+            size_bytes += size;
+            files.push(ModFile {
+                target: file.target.clone(),
+                size: Some(size),
+                sha256: Some(sha256_file(&to).map_err(|e| Error::io(&to, e))?),
+            });
+        }
+        Ok((size_bytes, files))
+    })();
+    match result {
+        Ok((size_bytes, files)) => Ok(Staged {
+            job,
+            archive,
+            staging,
+            files,
+            size_bytes,
+            plan,
+            fomod_choices,
+            replayed_choices,
+        }),
+        Err(e) => {
+            let _ = fs::remove_dir_all(&staging);
+            let _ = fs::remove_dir_all(&job.scratch);
+            Err(e)
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -375,6 +640,12 @@ impl Library {
     }
 
     // Installing
+    //
+    // An install has three steps so the slow part doesn't need the library:
+    // `begin_install` decides what to do (database reads), `InstallJob::
+    // extract` copies, hashes and extracts the archive and stages the files
+    // (no library), `complete_install` records it and swaps the folder in.
+    // The methods below that take `&mut self` do all three in a row.
 
     /// Extracts and installs an archive. When `instance_id` is given, the mod
     /// is enabled at the end of that install's active profile.
@@ -407,36 +678,36 @@ impl Library {
         &mut self,
         game: &GameDefinition,
         archive_path: &Path,
-        mut meta: ModMeta,
+        meta: ModMeta,
         instance_id: Option<&str>,
     ) -> Result<Prepared> {
+        let job = self.begin_install(game, archive_path, meta, instance_id)?;
+        let extracted = job.extract(game)?;
+        self.complete_install(game, extracted)
+    }
+
+    /// The first step of an install: what is known about the archive and the
+    /// mod it installs or updates.
+    pub fn begin_install(
+        &self,
+        game: &GameDefinition,
+        archive_path: &Path,
+        mut meta: ModMeta,
+        instance_id: Option<&str>,
+    ) -> Result<InstallJob> {
         let token = uuid::Uuid::new_v4().to_string();
-        let scratch = self.root.join("tmp").join(&token);
-        let mut archive_name = archive_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned());
-        // Keep a copy of the user's archive so the mod can be reinstalled.
-        let reused = meta.archive_id.is_some();
         let stored = match meta.archive_id {
             Some(id) => self.store.archive(id)?,
             None => None,
         };
-        let stored = match stored {
-            Some(a) => a,
-            None => self.store_archive(
-                archive_path,
-                archive_name.as_deref(),
-                ArchiveSource::Manual,
-                Ingest::Copy,
-                None,
-                (meta.nexus_mod_id, meta.nexus_file_id),
-            )?,
-        };
-        meta.archive_id = Some(stored.id);
-        if reused && stored.original_name.is_some() {
-            archive_name = stored.original_name.clone();
-        }
-        let archive_path = &self.root.join(&stored.path);
+        let archive_name = stored
+            .as_ref()
+            .and_then(|a| a.original_name.clone())
+            .or_else(|| {
+                archive_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            });
         // An update installs with the options chosen for the version it replaces.
         if meta.fomod_choices.is_none()
             && let Some(replaced) = &meta.replaces
@@ -452,64 +723,69 @@ impl Library {
             meta.version = meta.version.or(parsed.version);
             meta.nexus_mod_id = meta.nexus_mod_id.or(parsed.nexus_mod_id);
         }
-        let result = (|| {
-            archive::extract(archive_path, &scratch)?;
-            if let Some((installer, content_root)) = fomod::find_installer(&scratch)? {
-                let replay = meta
-                    .fomod_choices
-                    .as_ref()
-                    .map(|choices| fomod::replay(&installer, choices));
+        let archive = match stored {
+            Some(record) => JobArchive::Stored(record),
+            // Keep a copy of the user's archive so the mod can be reinstalled.
+            None => JobArchive::New {
+                path: archive_path.to_path_buf(),
+                original_name: archive_name.clone(),
+            },
+        };
+        Ok(InstallJob {
+            root: self.root.clone(),
+            game_id: game.id.clone(),
+            scratch: self.root.join("tmp").join(&token),
+            token,
+            archive,
+            archive_name,
+            meta,
+            instance_id: instance_id.map(String::from),
+        })
+    }
+
+    /// The last step of an install: records the mod (or the waiting
+    /// installer) in the library.
+    pub fn complete_install(
+        &mut self,
+        game: &GameDefinition,
+        extracted: Extracted,
+    ) -> Result<Prepared> {
+        match extracted {
+            Extracted::Files(staged) => self.commit_staged(game, staged).map(Prepared::Installed),
+            Extracted::Choices(waiting) => {
+                let ChoicesJob {
+                    mut job,
+                    archive,
+                    installer,
+                    content_root,
+                } = waiting;
+                job.meta.archive_id = Some(self.commit_archive(archive)?);
                 let request = FomodRequest {
-                    token: token.clone(),
-                    game_id: game.id.clone(),
-                    mod_name: meta
+                    token: job.token.clone(),
+                    game_id: job.game_id.clone(),
+                    mod_name: job
+                        .meta
                         .name
                         .clone()
                         .unwrap_or_else(|| installer.module_name.clone()),
-                    defaults: replay.as_ref().map_or_else(
+                    defaults: job.meta.fomod_choices.as_ref().map_or_else(
                         || fomod::default_selections(&installer),
-                        |r| r.selections.clone(),
+                        |c| fomod::replay(&installer, c).selections,
                     ),
-                    preselected: replay.is_some(),
+                    preselected: job.meta.fomod_choices.is_some(),
                     installer: installer.clone(),
                 };
                 self.pending.insert(
-                    token.clone(),
+                    job.token.clone(),
                     PendingFomod {
-                        game_id: game.id.clone(),
-                        scratch: scratch.clone(),
+                        job,
                         content_root,
                         installer,
-                        meta: meta.clone(),
-                        archive_name: archive_name.clone(),
-                        instance_id: instance_id.map(String::from),
                     },
                 );
-                // Same steps, groups and options as last time: no need to ask.
-                if replay.is_some_and(|r| r.complete) && !meta.ask_choices {
-                    let mut outcome = self.finish_fomod(game, &token, &request.defaults)?;
-                    outcome.replayed_choices = true;
-                    return Ok(Prepared::Installed(outcome));
-                }
-                return Ok(Prepared::NeedsChoices(request));
+                Ok(Prepared::NeedsChoices(request))
             }
-            let name = meta.name.clone().unwrap_or_else(|| "Unnamed mod".into());
-            let plan = installer::plan_install(game, &scratch, &name)?;
-            self.install_from_dir(
-                game,
-                &scratch,
-                plan,
-                meta.clone(),
-                archive_name.clone(),
-                instance_id,
-                None,
-            )
-            .map(Prepared::Installed)
-        })();
-        if !matches!(result, Ok(Prepared::NeedsChoices(_))) {
-            let _ = fs::remove_dir_all(&scratch);
         }
-        result
     }
 
     /// Where the installer stands with these choices: which steps show, what
@@ -544,51 +820,22 @@ impl Library {
         token: &str,
         selections: &fomod::Selections,
     ) -> Result<InstallOutcome> {
+        let job = self.take_fomod(token, selections)?;
+        let staged = job.stage(game)?;
+        self.commit_staged(game, staged)
+    }
+
+    /// Takes a waiting installer with valid choices out of the library, to
+    /// stage its files without it ([`FomodJob::stage`]), then
+    /// [`Library::complete_install`] with `Extracted::Files`.
+    pub fn take_fomod(&mut self, token: &str, selections: &fomod::Selections) -> Result<FomodJob> {
         let pending = self.pending_fomod(token)?;
         fomod::validate(&pending.installer, selections).map_err(Error::Install)?;
-        let mappings = fomod::resolve(&pending.installer, selections);
-        let pairs = fomod::expand(&pending.content_root, &mappings);
-        if pairs.is_empty() {
-            return Err(Error::Install(
-                "The chosen options don't install any files.".into(),
-            ));
-        }
-        let prefix = pending
-            .content_root
-            .strip_prefix(&pending.scratch)
-            .unwrap_or(Path::new(""))
-            .components()
-            .map(|c| format!("{}/", c.as_os_str().to_string_lossy()))
-            .collect::<String>();
-        let files: Vec<installer::PlannedFile> = pairs
-            .into_iter()
-            .map(|(source, target)| installer::PlannedFile {
-                source: format!("{prefix}{source}"),
-                target: installer::normalize_target(game, &target),
-            })
-            .collect();
-        let kinds: std::collections::BTreeSet<String> = files
-            .iter()
-            .filter_map(|f| game.layout_for(&f.target).map(|t| t.kind.clone()))
-            .collect();
-        let plan = InstallPlan {
-            files,
-            skipped: Vec::new(),
-            kinds: kinds.into_iter().collect(),
-            warnings: Vec::new(),
-        };
         let pending = self.pending.remove(token).expect("checked above");
-        let result = self.install_from_dir(
-            game,
-            &pending.scratch,
-            plan,
-            pending.meta,
-            pending.archive_name,
-            pending.instance_id.as_deref(),
-            Some(fomod::name_choices(&pending.installer, selections)),
-        );
-        let _ = fs::remove_dir_all(&pending.scratch);
-        result
+        Ok(FomodJob {
+            pending,
+            selections: selections.clone(),
+        })
     }
 
     /// A waiting installer again, e.g. when the user comes back to it.
@@ -596,24 +843,25 @@ impl Library {
         let pending = self.pending_fomod(token)?;
         Ok(FomodRequest {
             token: token.to_string(),
-            game_id: pending.game_id.clone(),
+            game_id: pending.job.game_id.clone(),
             mod_name: pending
+                .job
                 .meta
                 .name
                 .clone()
                 .unwrap_or_else(|| pending.installer.module_name.clone()),
-            defaults: pending.meta.fomod_choices.as_ref().map_or_else(
+            defaults: pending.job.meta.fomod_choices.as_ref().map_or_else(
                 || fomod::default_selections(&pending.installer),
                 |c| fomod::replay(&pending.installer, c).selections,
             ),
-            preselected: pending.meta.fomod_choices.is_some(),
+            preselected: pending.job.meta.fomod_choices.is_some(),
             installer: pending.installer.clone(),
         })
     }
 
     pub fn cancel_fomod(&mut self, token: &str) {
         if let Some(pending) = self.pending.remove(token) {
-            let _ = fs::remove_dir_all(pending.scratch);
+            let _ = fs::remove_dir_all(pending.job.scratch);
         }
     }
 
@@ -623,132 +871,140 @@ impl Library {
             .ok_or_else(|| Error::NotFound("this installer (it may have been cancelled)".into()))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn install_from_dir(
-        &mut self,
-        game: &GameDefinition,
-        extracted: &Path,
-        plan: InstallPlan,
-        meta: ModMeta,
-        archive_name: Option<String>,
-        instance_id: Option<&str>,
-        fomod_choices: Option<fomod::FomodChoices>,
-    ) -> Result<InstallOutcome> {
-        let name = meta.name.clone().unwrap_or_else(|| "Unnamed mod".into());
-
-        // Same Nexus file installed again, or an explicit update: replace it.
-        let existing = match &meta.replaces {
-            Some(id) => self.store.get_mod(id)?,
-            None => match (meta.nexus_mod_id, meta.nexus_file_id) {
-                (Some(mod_id), Some(file_id)) => self
-                    .store
-                    .find_mod_by_nexus_id(&game.id, mod_id)?
-                    .filter(|m| m.nexus_file_id == Some(file_id)),
-                _ => None,
-            },
-        };
-        let id = existing
-            .as_ref()
-            .map_or_else(|| uuid::Uuid::new_v4().to_string(), |m| m.id.clone());
-
-        // Stage into a fresh folder, then swap it in.
-        let staging = self.root.join("tmp").join(format!("{id}.staging"));
-        let mut size_bytes = 0u64;
-        let mut files = Vec::with_capacity(plan.files.len());
-        for file in &plan.files {
-            let from = join_relative(extracted, &file.source);
-            let to = join_relative(&staging, &file.target);
-            if let Some(parent) = to.parent() {
-                fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
-            }
-            fs::rename(&from, &to)
-                .or_else(|_| fs::copy(&from, &to).map(|_| ()))
-                .map_err(|e| Error::io(&to, e))?;
-            let size = fs::metadata(&to).map(|m| m.len()).unwrap_or(0);
-            size_bytes += size;
-            // Hashed once here, so deploying and checking drift don't have to.
-            files.push(ModFile {
-                target: file.target.clone(),
-                size: Some(size),
-                sha256: Some(sha256_file(&to).map_err(|e| Error::io(&to, e))?),
-            });
+    /// Records an archive put in the store during extraction (or finds the
+    /// stored copy with the same contents) and returns its id.
+    fn commit_archive(&self, archive: StoredArchive) -> Result<i64> {
+        match archive {
+            StoredArchive::Recorded(id) => Ok(id),
+            StoredArchive::Put {
+                hashes,
+                relative,
+                original_name,
+                nexus,
+            } => self
+                .record_archive(
+                    hashes,
+                    relative,
+                    original_name.as_deref(),
+                    ArchiveSource::Manual,
+                    nexus,
+                )
+                .map(|a| a.id),
         }
-        let final_dir = self.mod_dir(&id);
-        if final_dir.exists() {
-            fs::remove_dir_all(&final_dir).map_err(|e| Error::io(&final_dir, e))?;
-        }
-        fs::rename(&staging, &final_dir).map_err(|e| Error::io(&final_dir, e))?;
+    }
 
-        let archive_id = meta.archive_id;
-        let record = ModRecord {
-            id: id.clone(),
-            game_id: game.id.clone(),
-            name: existing
-                .as_ref()
-                .map_or(name, |m| meta.name.clone().unwrap_or(m.name.clone())),
-            // The version is the archive's; other details not known for
-            // this archive stay as they were.
-            version: meta.version,
-            author: meta
-                .author
-                .or_else(|| existing.as_ref().and_then(|m| m.author.clone())),
-            summary: meta
-                .summary
-                .or_else(|| existing.as_ref().and_then(|m| m.summary.clone())),
-            picture_url: meta
-                .picture_url
-                .or_else(|| existing.as_ref().and_then(|m| m.picture_url.clone())),
-            nexus_mod_id: meta
-                .nexus_mod_id
-                .or_else(|| existing.as_ref().and_then(|m| m.nexus_mod_id)),
-            nexus_file_id: meta.nexus_file_id,
-            archive_name,
-            kinds: plan.kinds.clone(),
-            file_count: plan.files.len() as u32,
+    /// Records the staged files as the mod (new, or replacing the one it
+    /// updates) and swaps its folder in.
+    fn commit_staged(&mut self, game: &GameDefinition, staged: Staged) -> Result<InstallOutcome> {
+        let Staged {
+            job,
+            archive,
+            staging,
+            files,
             size_bytes,
-            installed_at: now(),
-            revision: existing.as_ref().map_or(1, |m| m.revision + 1),
-            update_file_id: None,
-            update_version: None,
-            // An update keeps the mod's pin and skipped file; the next check
-            // looks at its files again.
-            nexus_updated_at: None,
-            pinned: existing.as_ref().is_some_and(|m| m.pinned),
-            ignored_update_file_id: existing.as_ref().and_then(|m| m.ignored_update_file_id),
-        };
-        self.store.insert_mod(&record, &files)?;
-        self.store.insert_revision(&ModRevision {
-            mod_id: id.clone(),
-            revision: record.revision,
-            archive_id,
+            plan,
             fomod_choices,
-            version: record.version.clone(),
-            nexus_file_id: record.nexus_file_id,
-            installed_at: record.installed_at,
-        })?;
-        self.apply_retention()?;
+            replayed_choices,
+        } = staged;
+        let result = (|| {
+            let archive_id = self.commit_archive(archive)?;
+            let meta = job.meta;
+            let name = meta.name.clone().unwrap_or_else(|| "Unnamed mod".into());
 
-        if existing.is_none()
-            && let Some(instance_id) = instance_id
-        {
-            let profile_id = self.ensure_active_profile(instance_id)?;
-            let mut entries = self.effective_entries(&game.id, &profile_id)?;
-            entries.retain(|e| e.mod_id != id);
-            entries.push(ProfileEntry {
+            // Same Nexus file installed again, or an explicit update: replace it.
+            let existing = match &meta.replaces {
+                Some(id) => self.store.get_mod(id)?,
+                None => match (meta.nexus_mod_id, meta.nexus_file_id) {
+                    (Some(mod_id), Some(file_id)) => self
+                        .store
+                        .find_mod_by_nexus_id(&game.id, mod_id)?
+                        .filter(|m| m.nexus_file_id == Some(file_id)),
+                    _ => None,
+                },
+            };
+            let id = existing
+                .as_ref()
+                .map_or_else(|| uuid::Uuid::new_v4().to_string(), |m| m.id.clone());
+
+            let final_dir = self.mod_dir(&id);
+            if final_dir.exists() {
+                fs::remove_dir_all(&final_dir).map_err(|e| Error::io(&final_dir, e))?;
+            }
+            fs::rename(&staging, &final_dir).map_err(|e| Error::io(&final_dir, e))?;
+
+            let record = ModRecord {
+                id: id.clone(),
+                game_id: game.id.clone(),
+                name: existing
+                    .as_ref()
+                    .map_or(name, |m| meta.name.clone().unwrap_or(m.name.clone())),
+                // The version is the archive's; other details not known for
+                // this archive stay as they were.
+                version: meta.version,
+                author: meta
+                    .author
+                    .or_else(|| existing.as_ref().and_then(|m| m.author.clone())),
+                summary: meta
+                    .summary
+                    .or_else(|| existing.as_ref().and_then(|m| m.summary.clone())),
+                picture_url: meta
+                    .picture_url
+                    .or_else(|| existing.as_ref().and_then(|m| m.picture_url.clone())),
+                nexus_mod_id: meta
+                    .nexus_mod_id
+                    .or_else(|| existing.as_ref().and_then(|m| m.nexus_mod_id)),
+                nexus_file_id: meta.nexus_file_id,
+                archive_name: job.archive_name,
+                kinds: plan.kinds.clone(),
+                file_count: files.len() as u32,
+                size_bytes,
+                installed_at: now(),
+                revision: existing.as_ref().map_or(1, |m| m.revision + 1),
+                update_file_id: None,
+                update_version: None,
+                // An update keeps the mod's pin and skipped file; the next
+                // check looks at its files again.
+                nexus_updated_at: None,
+                pinned: existing.as_ref().is_some_and(|m| m.pinned),
+                ignored_update_file_id: existing.as_ref().and_then(|m| m.ignored_update_file_id),
+            };
+            self.store.insert_mod(&record, &files)?;
+            self.store.insert_revision(&ModRevision {
                 mod_id: id.clone(),
-                enabled: true,
-                priority: 0,
-            });
-            self.save_entries(&profile_id, entries)?;
-        }
+                revision: record.revision,
+                archive_id: Some(archive_id),
+                fomod_choices,
+                version: record.version.clone(),
+                nexus_file_id: record.nexus_file_id,
+                installed_at: record.installed_at,
+            })?;
+            self.apply_retention()?;
 
-        Ok(InstallOutcome {
-            record,
-            skipped: plan.skipped,
-            warnings: plan.warnings,
-            replaced_existing: existing.is_some(),
-            replayed_choices: false,
-        })
+            if existing.is_none()
+                && let Some(instance_id) = job.instance_id.as_deref()
+            {
+                let profile_id = self.ensure_active_profile(instance_id)?;
+                let mut entries = self.effective_entries(&game.id, &profile_id)?;
+                entries.retain(|e| e.mod_id != id);
+                entries.push(ProfileEntry {
+                    mod_id: id.clone(),
+                    enabled: true,
+                    priority: 0,
+                });
+                self.save_entries(&profile_id, entries)?;
+            }
+
+            Ok(InstallOutcome {
+                record,
+                skipped: plan.skipped,
+                warnings: plan.warnings,
+                replaced_existing: existing.is_some(),
+                replayed_choices,
+            })
+        })();
+        let _ = fs::remove_dir_all(&staging);
+        let _ = fs::remove_dir_all(&job.scratch);
+        result
     }
 
     // Updates
@@ -960,6 +1216,20 @@ impl Library {
         instance_id: Option<&str>,
         change_options: bool,
     ) -> Result<Prepared> {
+        let job = self.reinstall_job(game, mod_id, revision, instance_id, change_options)?;
+        let extracted = job.extract(game)?;
+        self.complete_install(game, extracted)
+    }
+
+    /// The first step of [`Library::reinstall`].
+    pub fn reinstall_job(
+        &self,
+        game: &GameDefinition,
+        mod_id: &str,
+        revision: u32,
+        instance_id: Option<&str>,
+        change_options: bool,
+    ) -> Result<InstallJob> {
         let record = self
             .store
             .get_mod(mod_id)?
@@ -1001,7 +1271,7 @@ impl Library {
             ..Default::default()
         };
         let path = self.root.join(&archive.path);
-        self.prepare_archive(game, &path, meta, instance_id)
+        self.begin_install(game, &path, meta, instance_id)
     }
 
     /// Goes back to the newest earlier revision whose archive is kept.
@@ -1011,6 +1281,18 @@ impl Library {
         mod_id: &str,
         instance_id: Option<&str>,
     ) -> Result<Prepared> {
+        let job = self.rollback_job(game, mod_id, instance_id)?;
+        let extracted = job.extract(game)?;
+        self.complete_install(game, extracted)
+    }
+
+    /// The first step of [`Library::rollback`].
+    pub fn rollback_job(
+        &self,
+        game: &GameDefinition,
+        mod_id: &str,
+        instance_id: Option<&str>,
+    ) -> Result<InstallJob> {
         let record = self
             .store
             .get_mod(mod_id)?
@@ -1035,7 +1317,7 @@ impl Library {
                     record.name
                 ))
             })?;
-        self.reinstall(game, mod_id, target, instance_id, false)
+        self.reinstall_job(game, mod_id, target, instance_id, false)
     }
 
     /// How many revisions per mod keep their archive under the
@@ -1067,9 +1349,21 @@ impl Library {
         source: ArchiveSource,
         mode: Ingest,
         known: Option<Hashes>,
-        (nexus_mod_id, nexus_file_id): (Option<u32>, Option<u32>),
+        nexus: (Option<u32>, Option<u32>),
     ) -> Result<ArchiveRecord> {
         let (hashes, relative) = archives::put(&self.root, path, original_name, mode, known)?;
+        self.record_archive(hashes, relative, original_name, source, nexus)
+    }
+
+    /// Records a file already put in the store by [`archives::put`].
+    pub fn record_archive(
+        &self,
+        hashes: Hashes,
+        relative: String,
+        original_name: Option<&str>,
+        source: ArchiveSource,
+        (nexus_mod_id, nexus_file_id): (Option<u32>, Option<u32>),
+    ) -> Result<ArchiveRecord> {
         if let Some(existing) = self.store.archive_by_sha256(&hashes.sha256)? {
             self.store
                 .link_archive(existing.id, nexus_mod_id, nexus_file_id, original_name)?;
@@ -1164,7 +1458,7 @@ impl Library {
                 let waiting = self
                     .pending
                     .values()
-                    .any(|p| p.meta.archive_id == Some(archive.id));
+                    .any(|p| p.job.meta.archive_id == Some(archive.id));
                 ArchiveUsage {
                     unused: mods.is_empty() && !waiting,
                     mods,
@@ -2591,6 +2885,46 @@ mod tests {
         assert!(backups[0].starts_with("pre-migration-"));
         let copy = root.join("db-backups").join(&backups[0]);
         assert_eq!(crate::store::Store::version_of(&copy).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn installs_extract_without_the_library_and_commit_in_any_order() {
+        let mut f = fixture();
+        let id = f.instance.id.clone();
+        let a = zip(&f, "a.zip", &[("a.archive", "A")]);
+        let b = zip(&f, "b.zip", &[("b.archive", "B")]);
+        let job_a = f
+            .lib
+            .begin_install(&f.game, &a, ModMeta::default(), Some(&id))
+            .unwrap();
+        let job_b = f
+            .lib
+            .begin_install(&f.game, &b, ModMeta::default(), Some(&id))
+            .unwrap();
+        // The slow steps run on other threads, with no library at all.
+        let game = f.game.clone();
+        let (ea, eb) = std::thread::scope(|s| {
+            let ha = s.spawn(|| job_a.extract(&game).unwrap());
+            let hb = s.spawn(|| job_b.extract(&game).unwrap());
+            (ha.join().unwrap(), hb.join().unwrap())
+        });
+        f.lib.complete_install(&f.game, eb).unwrap();
+        f.lib.complete_install(&f.game, ea).unwrap();
+        let loadout = f.lib.loadout(&f.game, &f.instance).unwrap();
+        let names: Vec<&str> = loadout
+            .mods
+            .iter()
+            .map(|m| m.record.name.as_str())
+            .collect();
+        assert_eq!(names, ["b", "a"], "in the order they were committed");
+        assert_eq!(f.lib.archive_usage().unwrap().len(), 2);
+        assert!(
+            fs::read_dir(f.lib.root().join("tmp"))
+                .unwrap()
+                .next()
+                .is_none(),
+            "no scratch left behind"
+        );
     }
 
     #[test]

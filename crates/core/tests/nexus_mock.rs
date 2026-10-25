@@ -149,7 +149,11 @@ fn update_check_of_50_mods_with_3_changed_makes_4_requests() {
         .collect();
     assert_eq!(with_update.len(), 3);
     assert!(changed.iter().all(|c| with_update.contains(c)));
-    assert_eq!(lib.update_counts().unwrap()["cyberpunk2077"], 3, "the sidebar badge");
+    assert_eq!(
+        lib.update_counts().unwrap()["cyberpunk2077"],
+        3,
+        "the sidebar badge"
+    );
 
     // Automatic checks run at most once a day, and can be turned off.
     assert!(!lib.update_check_due(&game.id, now + 3600));
