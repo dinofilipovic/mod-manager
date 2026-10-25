@@ -18,6 +18,8 @@ pub struct AppState {
     pub cancelled: Mutex<HashSet<String>>,
     /// Games with an automatic update check running.
     pub checking: Mutex<HashSet<String>>,
+    /// The game update each game's automatic check was last started for.
+    pub update_triggers: Mutex<HashMap<String, i64>>,
     /// The install the user is looking at, per game; `nxm://` downloads go there.
     pub current_instance: Mutex<HashMap<String, String>>,
     /// Downloads waiting on FOMOD choices: installer token -> download id.
@@ -48,6 +50,7 @@ impl AppState {
             queue_wake: Condvar::new(),
             cancelled: Mutex::new(HashSet::new()),
             checking: Mutex::new(HashSet::new()),
+            update_triggers: Mutex::new(HashMap::new()),
             current_instance: Mutex::new(HashMap::new()),
             fomod_downloads: Mutex::new(HashMap::new()),
         }

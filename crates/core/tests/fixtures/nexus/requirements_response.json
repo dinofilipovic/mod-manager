@@ -1,0 +1,136 @@
+{
+  "data": {
+    "legacyModsByDomain": {
+      "nodes": [
+        {
+          "modId": 4198,
+          "name": "ArchiveXL",
+          "version": "1.28.0",
+          "game": {
+            "domainName": "cyberpunk2077"
+          },
+          "modRequirements": {
+            "nexusRequirements": {
+              "nodes": [
+                {
+                  "id": "[5517, 3333]",
+                  "modId": "2380",
+                  "modName": "RED4ext",
+                  "gameId": "3333",
+                  "externalRequirement": false,
+                  "notes": "",
+                  "url": ""
+                }
+              ]
+            },
+            "dlcRequirements": []
+          }
+        },
+        {
+          "modId": 107,
+          "name": "Cyber Engine Tweaks",
+          "version": "1.38.0",
+          "game": {
+            "domainName": "cyberpunk2077"
+          },
+          "modRequirements": {
+            "nexusRequirements": {
+              "nodes": []
+            },
+            "dlcRequirements": []
+          }
+        },
+        {
+          "modId": 4885,
+          "name": "Mod Settings",
+          "version": "0.2.21",
+          "game": {
+            "domainName": "cyberpunk2077"
+          },
+          "modRequirements": {
+            "nexusRequirements": {
+              "nodes": [
+                {
+                  "id": "[24714, 3333]",
+                  "modId": "2380",
+                  "modName": "RED4ext",
+                  "gameId": "3333",
+                  "externalRequirement": false,
+                  "notes": "",
+                  "url": ""
+                },
+                {
+                  "id": "[24715, 3333]",
+                  "modId": "1511",
+                  "modName": "redscript",
+                  "gameId": "3333",
+                  "externalRequirement": false,
+                  "notes": "",
+                  "url": ""
+                },
+                {
+                  "id": "[24716, 3333]",
+                  "modId": "4198",
+                  "modName": "ArchiveXL",
+                  "gameId": "3333",
+                  "externalRequirement": false,
+                  "notes": "Required since 0.2.0",
+                  "url": ""
+                }
+              ]
+            },
+            "dlcRequirements": []
+          }
+        },
+        {
+          "modId": 3518,
+          "name": "Native Settings UI",
+          "version": "1.97",
+          "game": {
+            "domainName": "cyberpunk2077"
+          },
+          "modRequirements": {
+            "nexusRequirements": {
+              "nodes": [
+                {
+                  "id": "[76885, 3333]",
+                  "modId": "107",
+                  "modName": "Cyber Engine Tweaks",
+                  "gameId": "3333",
+                  "externalRequirement": false,
+                  "notes": "Latest version",
+                  "url": ""
+                }
+              ]
+            },
+            "dlcRequirements": []
+          }
+        },
+        {
+          "modId": 4575,
+          "name": "Input Loader",
+          "version": "0.2.4",
+          "game": {
+            "domainName": "cyberpunk2077"
+          },
+          "modRequirements": {
+            "nexusRequirements": {
+              "nodes": [
+                {
+                  "id": "[6563, 3333]",
+                  "modId": "2380",
+                  "modName": "RED4ext",
+                  "gameId": "3333",
+                  "externalRequirement": false,
+                  "notes": "",
+                  "url": ""
+                }
+              ]
+            },
+            "dlcRequirements": []
+          }
+        }
+      ]
+    }
+  }
+}

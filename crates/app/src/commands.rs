@@ -160,12 +160,13 @@ pub async fn get_loadout(app: AppHandle, instance_id: String) -> LoadoutResult {
         let loadout = loadout(state, &instance_id)?;
         // The game was updated since its mods were last checked (also while
         // the app was closed): mods may need updates too.
+        // Tried once per game update in a run, so an offline or paused
+        // check isn't started again on every refresh.
         let checked = lock(&state.library).last_update_check(&game.id);
-        if loadout
-            .game
-            .updated_at
-            .is_some_and(|updated| checked.is_none_or(|c| c < updated))
+        if let Some(updated) = loadout.game.updated_at
+            && checked.is_none_or(|c| c < updated)
             && lock(&state.library).auto_update_check()
+            && lock(&state.update_triggers).insert(game.id.clone(), updated) != Some(updated)
         {
             spawn_update_check(app, game.clone());
         }
@@ -760,13 +761,18 @@ pub fn run_update_check(
         lookups += 1;
         let found = match client.identify_by_md5(&domain, &md5) {
             Ok(Some(found)) => Some(found),
-            Ok(None) => {
-                // The file name lookup costs two more requests.
-                lookups += 2;
-                archive_name
-                    .as_deref()
-                    .and_then(|name| client.identify(&domain, name).ok().flatten())
-            }
+            Ok(None) => match archive_name.as_deref() {
+                // Only a name with a Nexus mod id is looked up (two requests).
+                Some(name) if nexus::parse_archive_name(name).nexus_mod_id.is_some() => {
+                    lookups += 2;
+                    match client.identify(&domain, name) {
+                        Ok(found) => found,
+                        Err(e @ mm_core::Error::Network(_)) => return Err(err(e)),
+                        Err(_) => None,
+                    }
+                }
+                _ => None,
+            },
             // Offline: the check below would fail the same way.
             Err(e @ mm_core::Error::Network(_)) => return Err(err(e)),
             Err(_) => None,
