@@ -14,6 +14,7 @@ import { Icon } from "../components/Icon";
 import { useToast } from "../components/Toasts";
 import { KIND_LABELS, STORE_LABELS, plural, timeAgo } from "../format";
 import { ModDetails } from "./ModDetails";
+import { HealthView } from "./HealthView";
 import { ModList } from "./ModList";
 
 type DialogState =
@@ -59,6 +60,14 @@ export function GameView({
   const [dialog, setDialog] = useState<DialogState>(null);
   const [dropping, setDropping] = useState(false);
   const [copyProfile, setCopyProfile] = useState(true);
+  const [tab, setTab] = useState<"mods" | "health">("mods");
+  const [dismissedUpdate, setDismissedUpdate] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(`dismissed-update:${instance.id}`);
+    } catch {
+      return null;
+    }
+  });
 
   const id = instance.id;
   const reload = useCallback(async () => {
@@ -130,6 +139,11 @@ export function GameView({
     return () => void unlisten.then((f) => f());
   }, [install]);
 
+  const enableMod = async (modId: string) => {
+    const next = await run("Enabling", () => api.setModEnabled(id, modId, true));
+    if (next) setLoadout(next);
+  };
+
   const apply = async () => {
     const report = await run("Applying", () => api.deploy(id));
     if (report) {
@@ -177,6 +191,9 @@ export function GameView({
   }, [mods, query, kindFilter]);
 
   const missingDlls = instance.dll_overrides.filter((d) => !d.satisfied);
+  const modsMissing = mods.filter((m) => m.enabled && m.missing_requirements.length > 0);
+  const missingNames = [...new Set(modsMissing.flatMap((m) => m.missing_requirements.map((r) => r.name)))];
+  const healthIssues = missingNames.length + (loadout?.game.outdated_frameworks.length ? 1 : 0);
   const enabledCount = mods.filter((m) => m.enabled).length;
   const activeProfile = loadout?.profiles.find((p) => p.id === loadout.active_profile_id);
   const selectedMod = mods.find((m) => m.mod.id === selected) ?? null;
@@ -194,6 +211,7 @@ export function GameView({
                 <Icon name="wine" size={12} /> {envLabel}
               </span>
               <span className="chip">{STORE_LABELS[instance.store]}</span>
+              {instance.version && <span className="chip">Game {instance.version}</span>}
               <button className="chip chip-button" onClick={() => reveal(instance.install_path)} title={instance.install_path}>
                 <Icon name="folder" size={12} /> Game folder
               </button>
@@ -262,6 +280,81 @@ export function GameView({
           </section>
         )}
 
+        {modsMissing.length > 0 && (
+          <section className="setup" aria-label="Missing requirements">
+            <div className="setup-item setup-bad">
+              <Icon name="alert" className="bad-icon" />
+              <div>
+                <strong>
+                  {modsMissing.length === 1
+                    ? `${modsMissing[0].mod.name} needs ${missingNames.join(", ")}`
+                    : `${modsMissing.length} mods need ${missingNames.join(", ")}`}
+                </strong>
+                <p>Mods whose framework isn't installed and enabled silently do nothing in the game.</p>
+              </div>
+              <button className="primary" onClick={() => setTab("health")}>
+                Review
+              </button>
+            </div>
+          </section>
+        )}
+
+        {loadout && loadout.game.outdated_frameworks.length > 0 && dismissedUpdate !== String(loadout.game.updated_at) && (
+          <section className="setup" aria-label="Game updated">
+            <div className="setup-item">
+              <Icon name="alert" className="warn-icon" />
+              <div>
+                <strong>{game.name} was updated {timeAgo(loadout.game.updated_at ?? 0)}</strong>
+                <p>
+                  {loadout.game.outdated_frameworks.join(", ")} {loadout.game.outdated_frameworks.length === 1 ? "was" : "were"}{" "}
+                  installed before that. Script extenders often need an update after a game patch; if mods stopped working,
+                  update them first.
+                </p>
+              </div>
+              <div className="row">
+                {nexus?.user && <button onClick={checkUpdates}>Check updates</button>}
+                <button
+                  className="icon-button"
+                  aria-label="Dismiss"
+                  onClick={() => {
+                    const key = String(loadout.game.updated_at);
+                    setDismissedUpdate(key);
+                    try {
+                      localStorage.setItem(`dismissed-update:${instance.id}`, key);
+                    } catch {
+                      // Remembering the dismissal is optional.
+                    }
+                  }}
+                >
+                  <Icon name="x" />
+                </button>
+              </div>
+            </div>
+          </section>
+        )}
+
+        <div className="tabs" role="tablist" aria-label="View">
+          <button role="tab" aria-selected={tab === "mods"} className={tab === "mods" ? "active" : ""} onClick={() => setTab("mods")}>
+            Mods <span className="tab-count">{mods.length}</span>
+          </button>
+          <button role="tab" aria-selected={tab === "health"} className={tab === "health" ? "active" : ""} onClick={() => setTab("health")}>
+            Health
+            {healthIssues > 0 && <span className="tab-count bad">{healthIssues}</span>}
+          </button>
+        </div>
+
+        {tab === "health" ? (
+          loadout && (
+            <HealthView
+              instanceId={id}
+              loadout={loadout}
+              gameDomain={domain ?? null}
+              onLoadout={setLoadout}
+              onEnableMod={enableMod}
+            />
+          )
+        ) : (
+          <>
         <div className="toolbar">
           <div className="profile-picker">
             <Icon name="layers" />
@@ -363,7 +456,11 @@ export function GameView({
                 {plural(enabledCount, "mod")} enabled of {mods.length}
                 {query || kindFilter ? ` · showing ${filtered.length}` : ""}
               </span>
-              <span className="muted">Lower in the list wins when mods change the same file. Drag to reorder.</span>
+              <span className="muted">
+                {loadout?.archive_order === "ByList"
+                  ? "Lower in the list wins, including .archive load order. Drag to reorder."
+                  : "Lower in the list wins when mods contain the same file. Drag to reorder."}
+              </span>
             </div>
             <ModList
               mods={filtered}
@@ -382,6 +479,9 @@ export function GameView({
                 else void reload();
               }}
             />
+          </>
+        )}
+
           </>
         )}
 
@@ -422,6 +522,7 @@ export function GameView({
           }}
           onRemove={() => setDialog({ kind: "remove-mod", modId: selectedMod.mod.id, name: selectedMod.mod.name })}
           onRename={() => setDialog({ kind: "rename-mod", modId: selectedMod.mod.id, name: selectedMod.mod.name })}
+          onEnableMod={enableMod}
           onIdentify={async () => {
             const next = await run("Looking up on Nexus", () => api.identifyMod(id, selectedMod.mod.id));
             if (next) {

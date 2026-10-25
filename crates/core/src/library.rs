@@ -21,9 +21,12 @@ use crate::archive;
 use crate::deploy::{self, DeployReport, DesiredFile};
 use crate::detect::GameInstance;
 use crate::error::{Error, Result};
+use crate::fs_util::resolve_case_insensitive;
 use crate::game::GameDefinition;
+use crate::health;
 use crate::installer::{self, InstallPlan};
 use crate::nexus::{NexusMatch, parse_archive_name};
+use crate::requirements::{self, FrameworkState, FrameworkStatus, MissingRequirement, ModFiles};
 use crate::store::{ModRecord, Profile, ProfileEntry, Store};
 
 /// What is known about a mod before installing it.
@@ -80,6 +83,33 @@ pub struct Loadout {
     pub pending_changes: bool,
     #[ts(type = "number | null")]
     pub deployed_at: Option<i64>,
+    /// The game's frameworks (script extenders) and whether each is usable.
+    pub frameworks: Vec<FrameworkStatus>,
+    pub game: GameState,
+    /// How `.archive` mods are ordered; `None` if the game has no choice.
+    pub archive_order: Option<ArchiveOrder>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct GameState {
+    pub version: Option<String>,
+    pub build_id: Option<String>,
+    /// When the game's executable last changed (an update), if seen.
+    #[ts(type = "number | null")]
+    pub updated_at: Option<i64>,
+    /// Frameworks installed before that update. Script extenders usually
+    /// need a new version after a game patch.
+    pub outdated_frameworks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub enum ArchiveOrder {
+    /// The game's default: alphabetical by file name, first loaded wins.
+    ByFileName,
+    /// This app writes the game's load-order file from the mod list.
+    ByList,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -95,7 +125,12 @@ pub struct LoadoutMod {
     pub overridden_by: Vec<String>,
     /// Files shared with other enabled mods.
     pub conflict_files: u32,
+    /// Frameworks this mod needs that aren't available.
+    pub missing_requirements: Vec<MissingRequirement>,
 }
+
+/// Owner recorded for the generated load-order file in the deployment record.
+pub const LOAD_ORDER_FILE_OWNER: &str = "generated:load-order";
 
 pub struct Library {
     store: Store,
@@ -494,6 +529,37 @@ impl Library {
                 .unwrap_or_default()
         };
 
+        let deployed = self.store.deployed_files(&instance.id)?;
+        let files: Vec<Vec<String>> = entries
+            .iter()
+            .map(|e| self.store.mod_files(&e.mod_id))
+            .collect::<Result<_>>()?;
+        let analysis = {
+            let mod_files: Vec<ModFiles> = entries
+                .iter()
+                .zip(&files)
+                .filter_map(|(e, f)| {
+                    Some(ModFiles {
+                        id: &e.mod_id,
+                        name: &mods.get(&e.mod_id)?.name,
+                        enabled: e.enabled,
+                        files: f,
+                    })
+                })
+                .collect();
+            let placed: std::collections::HashSet<String> = deployed
+                .iter()
+                .map(|d| d.target.to_ascii_lowercase())
+                .collect();
+            requirements::analyze(game, &mod_files, |f| {
+                f.provides.iter().any(|p| {
+                    !placed.contains(&p.to_ascii_lowercase())
+                        && resolve_case_insensitive(&instance.install_path, p)
+                            .is_some_and(|f| f.is_file())
+                })
+            })
+        };
+
         let loadout_mods = entries
             .iter()
             .enumerate()
@@ -507,12 +573,16 @@ impl Library {
                     overrides: overrides[i].keys().map(name_of).collect(),
                     overridden_by: overridden_by[i].keys().map(name_of).collect(),
                     conflict_files: conflict_files[i],
+                    missing_requirements: analysis
+                        .missing
+                        .get(&e.mod_id)
+                        .cloned()
+                        .unwrap_or_default(),
                 })
             })
             .collect();
 
-        let desired = self.desired_files(&game.id, &profile_id)?;
-        let deployed = self.store.deployed_files(&instance.id)?;
+        let desired = self.desired_files(game, instance, &profile_id)?;
         let pending_changes = deployed.len() != desired.len()
             || deployed.iter().any(|d| {
                 desired
@@ -527,7 +597,60 @@ impl Library {
             mods: loadout_mods,
             pending_changes,
             deployed_at: self.store.deployed_at(&instance.id)?,
+            game: self.game_state(instance, &analysis.frameworks, &mods)?,
+            frameworks: analysis.frameworks,
+            archive_order: game
+                .load_order
+                .as_ref()
+                .map(|_| self.archive_order(&instance.id)),
         })
+    }
+
+    /// Notes game updates and which installed frameworks predate the last one.
+    fn game_state(
+        &self,
+        instance: &GameInstance,
+        frameworks: &[FrameworkStatus],
+        mods: &HashMap<String, ModRecord>,
+    ) -> Result<GameState> {
+        let updated_at = if instance.fingerprint.is_empty() {
+            None
+        } else {
+            self.store
+                .observe_game(&instance.id, &instance.fingerprint, now())?
+        };
+        let outdated_frameworks = match updated_at {
+            Some(updated) => frameworks
+                .iter()
+                .filter_map(|f| match &f.state {
+                    FrameworkState::Installed { mod_name } => mods
+                        .values()
+                        .find(|m| &m.name == mod_name && m.installed_at < updated)
+                        .map(|_| f.name.clone()),
+                    _ => None,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        Ok(GameState {
+            version: instance.version.clone(),
+            build_id: instance.build_id.clone(),
+            updated_at,
+            outdated_frameworks,
+        })
+    }
+
+    pub fn archive_order(&self, instance_id: &str) -> ArchiveOrder {
+        match self.store.setting(&format!("archive_order:{instance_id}")) {
+            Ok(Some(v)) if v == "list" => ArchiveOrder::ByList,
+            _ => ArchiveOrder::ByFileName,
+        }
+    }
+
+    pub fn set_archive_order(&self, instance_id: &str, order: ArchiveOrder) -> Result<()> {
+        let value = (order == ArchiveOrder::ByList).then_some("list");
+        self.store
+            .set_setting(&format!("archive_order:{instance_id}"), value)
     }
 
     fn mod_kinds(&self, game: &GameDefinition, mod_id: &str) -> Vec<String> {
@@ -543,18 +666,26 @@ impl Library {
 
     fn desired_files(
         &self,
-        game_id: &str,
+        game: &GameDefinition,
+        instance: &GameInstance,
         profile_id: &str,
     ) -> Result<BTreeMap<String, DesiredFile>> {
         let mods: HashMap<String, ModRecord> = self
             .store
-            .mods_for_game(game_id)?
+            .mods_for_game(&game.id)?
             .into_iter()
             .map(|m| (m.id.clone(), m))
             .collect();
         let mut desired = BTreeMap::new();
+        // Archive file names per enabled mod, in load order (for modlist.txt).
+        let mut archives_by_mod: Vec<Vec<String>> = Vec::new();
+        let order_folder = game.load_order.as_ref().and_then(|o| {
+            o.file
+                .rsplit_once('/')
+                .map(|(dir, _)| dir.to_ascii_lowercase())
+        });
         for entry in self
-            .effective_entries(game_id, profile_id)?
+            .effective_entries(&game.id, profile_id)?
             .iter()
             .filter(|e| e.enabled)
         {
@@ -562,7 +693,17 @@ impl Library {
                 continue;
             };
             let dir = self.mod_dir(&record.id);
+            let mut archives = Vec::new();
             for target in self.store.mod_files(&record.id)? {
+                if let (Some(folder), Some(order)) = (&order_folder, &game.load_order)
+                    && let Some((parent, name)) = target.rsplit_once('/')
+                    && parent.eq_ignore_ascii_case(folder)
+                    && name.rsplit_once('.').is_some_and(|(_, ext)| {
+                        order.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))
+                    })
+                {
+                    archives.push(name.to_string());
+                }
                 desired.insert(
                     target.to_ascii_lowercase(),
                     DesiredFile {
@@ -573,8 +714,79 @@ impl Library {
                     },
                 );
             }
+            archives_by_mod.push(archives);
+        }
+
+        if let Some(order) = &game.load_order
+            && self.archive_order(&instance.id) == ArchiveOrder::ByList
+            && archives_by_mod.iter().any(|a| !a.is_empty())
+        {
+            let generated = self.write_load_order(instance, order, &archives_by_mod, &desired)?;
+            desired.insert(order.file.to_ascii_lowercase(), generated);
         }
         Ok(desired)
+    }
+
+    /// Writes the game's load-order file. The game loads the first-listed
+    /// archive first and the first loaded wins, while in the mod list the
+    /// lowest mod wins, so mods are listed bottom-up. Archives this app
+    /// doesn't manage keep the game's alphabetical order, after ours.
+    fn write_load_order(
+        &self,
+        instance: &GameInstance,
+        order: &crate::game::LoadOrderFile,
+        archives_by_mod: &[Vec<String>],
+        desired: &BTreeMap<String, DesiredFile>,
+    ) -> Result<DesiredFile> {
+        let mut lines: Vec<String> = Vec::new();
+        for archives in archives_by_mod.iter().rev() {
+            for name in archives {
+                if !lines.iter().any(|l| l.eq_ignore_ascii_case(name)) {
+                    lines.push(name.clone());
+                }
+            }
+        }
+        let folder = order.file.rsplit_once('/').map_or("", |(dir, _)| dir);
+        let deployed: std::collections::HashSet<String> = self
+            .store
+            .deployed_files(&instance.id)?
+            .into_iter()
+            .map(|d| d.target.to_ascii_lowercase())
+            .collect();
+        let mut unmanaged: Vec<String> = resolve_case_insensitive(&instance.install_path, folder)
+            .and_then(|dir| fs::read_dir(dir).ok())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| {
+                let key = format!("{folder}/{name}").to_ascii_lowercase();
+                name.rsplit_once('.').is_some_and(|(_, ext)| {
+                    order.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))
+                }) && !desired.contains_key(&key)
+                    && !deployed.contains(&key)
+            })
+            .collect();
+        unmanaged.sort();
+        lines.extend(unmanaged);
+
+        let content = format!("{}\n", lines.join("\n"));
+        let path = join_relative(&self.root.join("generated").join(&instance.id), &order.file);
+        if fs::read_to_string(&path).ok().as_deref() != Some(content.as_str()) {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+            }
+            fs::write(&path, &content).map_err(|e| Error::io(&path, e))?;
+        }
+        let revision = content.bytes().fold(0x811c9dc5u32, |h, b| {
+            (h ^ u32::from(b)).wrapping_mul(0x01000193)
+        });
+        Ok(DesiredFile {
+            target: order.file.clone(),
+            mod_id: LOAD_ORDER_FILE_OWNER.into(),
+            revision,
+            source: path,
+        })
     }
 
     /// Makes the game folder match the active profile.
@@ -584,7 +796,7 @@ impl Library {
         instance: &GameInstance,
     ) -> Result<DeployReport> {
         let profile_id = self.ensure_active_profile(&instance.id)?;
-        let desired = self.desired_files(&game.id, &profile_id)?;
+        let desired = self.desired_files(game, instance, &profile_id)?;
         self.apply(game, instance, &desired)
     }
 
@@ -623,6 +835,60 @@ impl Library {
         self.store
             .set_deployed_files(&instance.id, &deployed, now())?;
         Ok(report)
+    }
+
+    /// The game's logs with their errors and warnings, attributed to the
+    /// active profile's enabled mods where possible.
+    pub fn logs(
+        &mut self,
+        game: &GameDefinition,
+        instance: &GameInstance,
+    ) -> Result<Vec<health::LogReport>> {
+        let profile_id = self.ensure_active_profile(&instance.id)?;
+        let mods: HashMap<String, ModRecord> = self
+            .store
+            .mods_for_game(&game.id)?
+            .into_iter()
+            .map(|m| (m.id.clone(), m))
+            .collect();
+        let mut hints = Vec::new();
+        for entry in self
+            .effective_entries(&game.id, &profile_id)?
+            .iter()
+            .filter(|e| e.enabled)
+        {
+            if let Some(record) = mods.get(&entry.mod_id) {
+                hints.push(health::hints_for(
+                    game,
+                    &record.name,
+                    &self.store.mod_files(&record.id)?,
+                ));
+            }
+        }
+        let applied_at = self.store.deployed_at(&instance.id)?;
+        Ok(health::read_logs(
+            game,
+            &instance.install_path,
+            &hints,
+            applied_at,
+        ))
+    }
+
+    /// The end of one of the game's known logs. Only paths the game
+    /// definition lists can be read.
+    pub fn log_tail(
+        &self,
+        game: &GameDefinition,
+        instance: &GameInstance,
+        relative_path: &str,
+        max_lines: usize,
+    ) -> Result<Vec<String>> {
+        let wanted = join_relative(&instance.install_path, relative_path);
+        let path = health::log_paths(game, &instance.install_path)
+            .into_iter()
+            .find(|p| *p == wanted)
+            .ok_or_else(|| Error::NotFound(format!("log {relative_path}")))?;
+        health::tail(&path, max_lines).map_err(|e| Error::io(&path, e))
     }
 
     /// Total size of the library's mod folders, in bytes.
@@ -692,6 +958,9 @@ mod tests {
                 environment_id: "test".into(),
                 store: GameStore::Steam,
                 install_path: game_dir,
+                version: None,
+                build_id: None,
+                fingerprint: "test".into(),
                 dll_overrides: vec![],
             },
             archives,
@@ -774,6 +1043,68 @@ mod tests {
 
         f.lib.purge(&f.game, &f.instance).unwrap();
         assert!(!shared.exists());
+    }
+
+    #[test]
+    fn writes_load_order_file_when_enabled() {
+        let mut f = fixture();
+        let id = f.instance.id.clone();
+        let a = zip(&f, "a.zip", &[("a.archive", "A")]);
+        let b = zip(&f, "b.zip", &[("b.archive", "B")]);
+        f.lib
+            .install_archive(&f.game, &a, ModMeta::default(), Some(&id))
+            .unwrap();
+        f.lib
+            .install_archive(&f.game, &b, ModMeta::default(), Some(&id))
+            .unwrap();
+        let folder = f.instance.install_path.join("archive/pc/mod");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("manual.archive"), "M").unwrap();
+        let modlist = folder.join("modlist.txt");
+
+        f.lib.deploy(&f.game, &f.instance).unwrap();
+        assert!(!modlist.exists(), "off by default");
+
+        f.lib.set_archive_order(&id, ArchiveOrder::ByList).unwrap();
+        let loadout = f.lib.loadout(&f.game, &f.instance).unwrap();
+        assert!(loadout.pending_changes);
+        assert_eq!(loadout.archive_order, Some(ArchiveOrder::ByList));
+        f.lib.deploy(&f.game, &f.instance).unwrap();
+        // B is lower in the list, so it must load (and win) first.
+        assert_eq!(
+            fs::read_to_string(&modlist).unwrap(),
+            "b.archive\na.archive\nmanual.archive\n"
+        );
+
+        f.lib
+            .set_archive_order(&id, ArchiveOrder::ByFileName)
+            .unwrap();
+        f.lib.deploy(&f.game, &f.instance).unwrap();
+        assert!(!modlist.exists());
+    }
+
+    #[test]
+    fn flags_missing_frameworks() {
+        let mut f = fixture();
+        let id = f.instance.id.clone();
+        let script = zip(&f, "script.zip", &[("r6/scripts/Cool/main.reds", "x")]);
+        f.lib
+            .install_archive(&f.game, &script, ModMeta::default(), Some(&id))
+            .unwrap();
+        let loadout = f.lib.loadout(&f.game, &f.instance).unwrap();
+        let missing: Vec<&str> = loadout.mods[0]
+            .missing_requirements
+            .iter()
+            .map(|m| m.framework_id.as_str())
+            .collect();
+        assert_eq!(missing, ["redscript"]);
+
+        // A manual redscript install in the game folder satisfies it.
+        let scc = f.instance.install_path.join("engine/tools/scc.exe");
+        fs::create_dir_all(scc.parent().unwrap()).unwrap();
+        fs::write(&scc, "x").unwrap();
+        let loadout = f.lib.loadout(&f.game, &f.instance).unwrap();
+        assert!(loadout.mods[0].missing_requirements.is_empty());
     }
 
     #[test]

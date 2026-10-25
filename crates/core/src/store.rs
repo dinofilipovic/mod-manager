@@ -8,7 +8,7 @@ use ts_rs::TS;
 
 use crate::error::Result;
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE mods (
@@ -68,11 +68,30 @@ CREATE TABLE deployed_files (
     PRIMARY KEY (instance_id, target)
 );
 
+CREATE TABLE game_state (
+    instance_id TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    updated_at INTEGER
+);
+
 CREATE TABLE settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 ";
+
+/// Upgrades from older databases: `(version, SQL)` runs when the database is
+/// at that version or older.
+const MIGRATIONS: &[(i32, &str)] = &[(
+    1,
+    "CREATE TABLE game_state (
+        instance_id TEXT PRIMARY KEY,
+        fingerprint TEXT NOT NULL,
+        first_seen INTEGER NOT NULL,
+        updated_at INTEGER
+    );",
+)];
 
 /// An installed mod in the library. Mods belong to a game and are shared by
 /// all installs (instances) of that game.
@@ -147,6 +166,13 @@ impl Store {
         let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version == 0 {
             conn.execute_batch(SCHEMA)?;
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        } else if version < SCHEMA_VERSION {
+            for (from, migration) in MIGRATIONS {
+                if version <= *from {
+                    conn.execute_batch(migration)?;
+                }
+            }
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(Self { conn })
@@ -447,6 +473,43 @@ impl Store {
         Ok(())
     }
 
+    // Game state
+
+    /// Records the game's current fingerprint and returns when it last
+    /// changed (an update or repair), if a change has been seen.
+    pub fn observe_game(
+        &self,
+        instance_id: &str,
+        fingerprint: &str,
+        now: i64,
+    ) -> Result<Option<i64>> {
+        let previous: Option<(String, Option<i64>)> = self
+            .conn
+            .query_row(
+                "SELECT fingerprint, updated_at FROM game_state WHERE instance_id = ?1",
+                [instance_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match previous {
+            None => {
+                self.conn.execute(
+                    "INSERT INTO game_state (instance_id, fingerprint, first_seen) VALUES (?1, ?2, ?3)",
+                    params![instance_id, fingerprint, now],
+                )?;
+                Ok(None)
+            }
+            Some((old, updated_at)) if old == fingerprint => Ok(updated_at),
+            Some(_) => {
+                self.conn.execute(
+                    "UPDATE game_state SET fingerprint = ?2, updated_at = ?3 WHERE instance_id = ?1",
+                    params![instance_id, fingerprint, now],
+                )?;
+                Ok(Some(now))
+            }
+        }
+    }
+
     // Settings
 
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
@@ -491,4 +554,35 @@ fn row_to_mod(r: &rusqlite::Row) -> rusqlite::Result<ModRecord> {
         update_file_id: r.get("update_file_id")?,
         update_version: r.get("update_version")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notices_game_updates() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.observe_game("i", "a", 10).unwrap(), None);
+        assert_eq!(store.observe_game("i", "a", 20).unwrap(), None);
+        assert_eq!(store.observe_game("i", "b", 30).unwrap(), Some(30));
+        assert_eq!(store.observe_game("i", "b", 40).unwrap(), Some(30));
+    }
+
+    #[test]
+    fn migrates_version_1_databases() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&SCHEMA.replace(
+                "CREATE TABLE game_state (\n    instance_id TEXT PRIMARY KEY,\n    fingerprint TEXT NOT NULL,\n    first_seen INTEGER NOT NULL,\n    updated_at INTEGER\n);\n",
+                "",
+            ))
+            .unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.observe_game("i", "a", 1).unwrap(), None);
+    }
 }

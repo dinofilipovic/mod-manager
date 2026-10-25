@@ -8,7 +8,8 @@
 use std::path::PathBuf;
 
 use mm_core::deploy::DeployReport;
-use mm_core::library::{InstallOutcome, Loadout, ModMeta};
+use mm_core::health::LogReport;
+use mm_core::library::{ArchiveOrder, InstallOutcome, Loadout, ModMeta};
 use mm_core::nexus::{self, Download, NexusClient, NexusUser};
 use mm_core::{GameDefinition, ScanResult};
 use serde::Serialize;
@@ -326,6 +327,46 @@ pub async fn switch_profile(
             .set_active_profile(&instance_id, &profile_id)
             .map_err(err)?;
         loadout(state, &instance_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_archive_order(
+    app: AppHandle,
+    instance_id: String,
+    order: ArchiveOrder,
+) -> LoadoutResult {
+    blocking(app, move |_, state| {
+        lock(&state.library)
+            .set_archive_order(&instance_id, order)
+            .map_err(err)?;
+        loadout(state, &instance_id)
+    })
+    .await
+}
+
+/// The game's logs with errors and warnings, read fresh each time.
+#[tauri::command]
+pub async fn game_logs(app: AppHandle, instance_id: String) -> CommandResult<Vec<LogReport>> {
+    blocking(app, move |_, state| {
+        let (instance, game, _) = state.resolve(&instance_id)?;
+        lock(&state.library).logs(game, &instance).map_err(err)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn read_log(
+    app: AppHandle,
+    instance_id: String,
+    relative_path: String,
+) -> CommandResult<Vec<String>> {
+    blocking(app, move |_, state| {
+        let (instance, game, _) = state.resolve(&instance_id)?;
+        lock(&state.library)
+            .log_tail(game, &instance, &relative_path, 400)
+            .map_err(err)
     })
     .await
 }

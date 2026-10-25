@@ -9,7 +9,9 @@ import type { DeployReport } from "./bindings/DeployReport";
 import type { Download } from "./bindings/Download";
 import type { GameDefinition } from "./bindings/GameDefinition";
 import type { ImportResult } from "./bindings/ImportResult";
+import type { ArchiveOrder } from "./bindings/ArchiveOrder";
 import type { Loadout } from "./bindings/Loadout";
+import type { LogReport } from "./bindings/LogReport";
 import type { NexusStatus } from "./bindings/NexusStatus";
 import type { NexusUser } from "./bindings/NexusUser";
 import type { ScanResult } from "./bindings/ScanResult";
@@ -40,6 +42,10 @@ export const api = {
   switchProfile: (instanceId: string, profileId: string) =>
     invoke<Loadout>("switch_profile", { instanceId, profileId }),
 
+  setArchiveOrder: (instanceId: string, order: ArchiveOrder) =>
+    invoke<Loadout>("set_archive_order", { instanceId, order }),
+  gameLogs: (instanceId: string) => invoke<LogReport[]>("game_logs", { instanceId }),
+  readLog: (instanceId: string, relativePath: string) => invoke<string[]>("read_log", { instanceId, relativePath }),
   deploy: (instanceId: string) => invoke<DeployReport>("deploy", { instanceId }),
   purge: (instanceId: string) => invoke<DeployReport>("purge", { instanceId }),
   fixDllOverrides: (instanceId: string) => invoke<ScanResult>("fix_dll_overrides", { instanceId }),

@@ -28,6 +28,9 @@ const scan: ScanResult = {
       environment_id: "crossover:Cyberpunk 2077",
       store: "Steam",
       install_path: "/Users/demo/.../steamapps/common/Cyberpunk 2077",
+      version: "2.5",
+      build_id: "26161058",
+      fingerprint: "demo",
       dll_overrides: [
         { dll: "version", required: "native,builtin", current: null, satisfied: false, reason: "Cyber Engine Tweaks loads through version.dll" },
         { dll: "winmm", required: "native,builtin", current: null, satisfied: false, reason: "RED4ext loads through winmm.dll" },
@@ -47,6 +50,10 @@ const game: GameDefinition = {
   root_markers: [],
   wine: { dll_overrides: [] },
   launch: { modded_args: ["-modded"] },
+  frameworks: [],
+  requirements: [],
+  logs: [],
+  load_order: { file: "archive/pc/mod/modlist.txt", extensions: ["archive"] },
 };
 
 function mod(id: string, name: string, kinds: string[], extra: Partial<ModRecord> = {}): ModRecord {
@@ -73,15 +80,16 @@ function mod(id: string, name: string, kinds: string[], extra: Partial<ModRecord
 }
 
 let mods: LoadoutMod[] = [
-  { mod: mod("cet", "Cyber Engine Tweaks", ["cet"], { version: "1.35.0", author: "yamashi", nexus_mod_id: 107, nexus_file_id: 1, size_bytes: 12_500_000 }), enabled: true, overrides: [], overridden_by: [], conflict_files: 0 },
-  { mod: mod("red4ext", "RED4ext", ["red4ext"], { version: "1.27.0", author: "WopsS", nexus_mod_id: 2380, nexus_file_id: 1, update_file_id: 2, update_version: "1.28.0" }), enabled: true, overrides: [], overridden_by: [], conflict_files: 0 },
-  { mod: mod("archivexl", "ArchiveXL", ["archive", "red4ext"], { version: "1.21.1", author: "psiberx" }), enabled: true, overrides: [], overridden_by: [], conflict_files: 0 },
-  { mod: mod("hd", "HD Reworked Project", ["archive"], { version: "2.0", author: "Halk", size_bytes: 4_200_000_000 }), enabled: true, overrides: [], overridden_by: ["Better Neon Lights"], conflict_files: 3 },
-  { mod: mod("neon", "Better Neon Lights", ["archive"], { author: "Glow" }), enabled: true, overrides: ["HD Reworked Project"], overridden_by: [], conflict_files: 3 },
-  { mod: mod("hud", "Immersive HUD", ["cet", "redscript"], { version: "0.9" }), enabled: false, overrides: [], overridden_by: [], conflict_files: 0 },
-  { mod: mod("redmod", "Night City Radio Expanded", ["redmod"]), enabled: true, overrides: [], overridden_by: [], conflict_files: 0 },
+  { mod: mod("cet", "Cyber Engine Tweaks", ["cet"], { version: "1.35.0", author: "yamashi", nexus_mod_id: 107, nexus_file_id: 1, size_bytes: 12_500_000 }), enabled: true, overrides: [], overridden_by: [], conflict_files: 0, missing_requirements: [] },
+  { mod: mod("red4ext", "RED4ext", ["red4ext"], { version: "1.27.0", author: "WopsS", nexus_mod_id: 2380, nexus_file_id: 1, update_file_id: 2, update_version: "1.28.0" }), enabled: true, overrides: [], overridden_by: [], conflict_files: 0, missing_requirements: [] },
+  { mod: mod("archivexl", "ArchiveXL", ["archive", "red4ext"], { version: "1.21.1", author: "psiberx" }), enabled: true, overrides: [], overridden_by: [], conflict_files: 0, missing_requirements: [] },
+  { mod: mod("hd", "HD Reworked Project", ["archive"], { version: "2.0", author: "Halk", size_bytes: 4_200_000_000 }), enabled: true, overrides: [], overridden_by: ["Better Neon Lights"], conflict_files: 3, missing_requirements: [] },
+  { mod: mod("neon", "Better Neon Lights", ["archive"], { author: "Glow" }), enabled: true, overrides: ["HD Reworked Project"], overridden_by: [], conflict_files: 3, missing_requirements: [] },
+  { mod: mod("hud", "Immersive HUD", ["cet", "redscript"], { version: "0.9" }), enabled: true, overrides: [], overridden_by: [], conflict_files: 0, missing_requirements: [{ framework_id: "redscript", name: "redscript", nexus_mod_id: 1511, disabled_mod_id: null }] },
+  { mod: mod("redmod", "Night City Radio Expanded", ["redmod"]), enabled: true, overrides: [], overridden_by: [], conflict_files: 0, missing_requirements: [] },
 ];
 let pending = true;
+let archiveOrder: "ByFileName" | "ByList" = "ByFileName";
 
 const loadout = (): Loadout => ({
   instance_id: INSTANCE,
@@ -93,6 +101,15 @@ const loadout = (): Loadout => ({
   mods,
   pending_changes: pending,
   deployed_at: now - 3600,
+  frameworks: [
+    { id: "cet", name: "Cyber Engine Tweaks", nexus_mod_id: 107, state: { state: "Installed", mod_name: "Cyber Engine Tweaks" }, needed_by: ["Immersive HUD"] },
+    { id: "red4ext", name: "RED4ext", nexus_mod_id: 2380, state: { state: "Installed", mod_name: "RED4ext" }, needed_by: ["ArchiveXL"] },
+    { id: "redscript", name: "redscript", nexus_mod_id: 1511, state: { state: "NotInstalled" }, needed_by: ["Immersive HUD"] },
+    { id: "archivexl", name: "ArchiveXL", nexus_mod_id: 4198, state: { state: "Installed", mod_name: "ArchiveXL" }, needed_by: [] },
+    { id: "tweakxl", name: "TweakXL", nexus_mod_id: 4197, state: { state: "NotInstalled" }, needed_by: [] },
+  ],
+  game: { version: "2.5", build_id: "26161058", updated_at: now - 7200, outdated_frameworks: ["Cyber Engine Tweaks"] },
+  archive_order: archiveOrder,
 });
 
 const downloads: Download[] = [
@@ -146,6 +163,42 @@ export function installDevMock() {
           return downloads;
         case "app_info":
           return { version: "0.1.0", data_dir: "/Users/demo/Library/Application Support/ModManager", library_bytes: 4_300_000_000, crossover_installed: true };
+        case "set_archive_order":
+          archiveOrder = a.order as typeof archiveOrder;
+          pending = true;
+          return loadout();
+        case "game_logs":
+          return [
+            {
+              name: "Cyber Engine Tweaks",
+              framework: "cet",
+              relative_path: "bin/x64/plugins/cyber_engine_tweaks/cyber_engine_tweaks.log",
+              path: "/demo/cyber_engine_tweaks.log",
+              modified_at: now - 600,
+              size_bytes: 18_000,
+              stale: false,
+              error_count: 1,
+              warning_count: 2,
+              entries: [
+                { line: 40, severity: "Warning", text: "[warning] Font not found, using fallback", mod_name: null },
+                { line: 88, severity: "Error", text: "[error] [ImmersiveHUD] init.lua:12: attempt to index a nil value (global 'Game')", mod_name: "Immersive HUD" },
+              ],
+            },
+            {
+              name: "RED4ext",
+              framework: "red4ext",
+              relative_path: "red4ext/logs/red4ext.log",
+              path: "/demo/red4ext.log",
+              modified_at: now - 600,
+              size_bytes: 4_000,
+              stale: false,
+              error_count: 0,
+              warning_count: 0,
+              entries: [],
+            },
+          ];
+        case "read_log":
+          return ["[info] CET version 1.38.0", "[info] Game version 2.5", "[error] [ImmersiveHUD] init.lua:12: attempt to index a nil value"];
         case "launch_game":
           return null;
         default:

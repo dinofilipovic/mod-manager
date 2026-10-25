@@ -17,6 +17,7 @@ export function ModDetails({
   onRename,
   onUpdate,
   onIdentify,
+  onEnableMod,
 }: {
   entry: LoadoutMod;
   index: number;
@@ -29,6 +30,7 @@ export function ModDetails({
   onRename: () => void;
   onUpdate: () => void;
   onIdentify: () => Promise<void>;
+  onEnableMod: (modId: string) => void;
 }) {
   const m = entry.mod;
   const [files, setFiles] = useState<string[] | null>(null);
@@ -66,6 +68,30 @@ export function ModDetails({
         ))}
       </div>
       {m.summary && <p className="summary">{m.summary}</p>}
+
+      {entry.enabled && entry.missing_requirements.length > 0 && (
+        <div className="callout callout-bad">
+          <strong>Won't work yet: needs {entry.missing_requirements.map((r) => r.name).join(", ")}</strong>
+          <ul className="requirements">
+            {entry.missing_requirements.map((r) => (
+              <li key={r.framework_id}>
+                <span>{r.name}</span>
+                {r.disabled_mod_id ? (
+                  <button className="primary" onClick={() => onEnableMod(r.disabled_mod_id!)}>
+                    Enable it
+                  </button>
+                ) : gameDomain && r.nexus_mod_id ? (
+                  <button onClick={() => openExternal(nexusUrls.modPage(gameDomain, r.nexus_mod_id!))}>
+                    <Icon name="external" /> Get it
+                  </button>
+                ) : (
+                  <span className="muted small">Not installed</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {!m.nexus_file_id && m.archive_name && gameDomain && (
         <div className="callout callout-neutral">

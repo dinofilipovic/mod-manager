@@ -33,6 +33,74 @@ pub struct GameDefinition {
     pub wine: WineRequirements,
     #[serde(default)]
     pub launch: LaunchOptions,
+    #[serde(default)]
+    pub frameworks: Vec<Framework>,
+    #[serde(default)]
+    pub requirements: Vec<Requirement>,
+    #[serde(default)]
+    pub logs: Vec<LogSource>,
+    pub load_order: Option<LoadOrderFile>,
+}
+
+/// A framework other mods depend on, such as a script extender.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct Framework {
+    pub id: String,
+    pub name: String,
+    pub nexus_mod_id: Option<u32>,
+    /// Game-relative files that are present when the framework is installed.
+    pub provides: Vec<String>,
+    /// Frameworks this one needs.
+    #[serde(default)]
+    pub requires: Vec<String>,
+}
+
+/// Mod files that need a framework: matched by extension or by folder.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct Requirement {
+    pub framework: String,
+    #[serde(default)]
+    pub extensions: Vec<String>,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+impl Requirement {
+    pub fn matches(&self, target: &str) -> bool {
+        let lower = target.to_ascii_lowercase();
+        let ext_match = lower
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| self.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)));
+        ext_match
+            || self.paths.iter().any(|p| {
+                let p = p.trim_end_matches('/').to_ascii_lowercase();
+                lower.starts_with(&format!("{p}/"))
+            })
+    }
+}
+
+/// A log file the game or a framework writes.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct LogSource {
+    pub name: String,
+    /// Game-relative path; `*` matches within one path component.
+    pub path: String,
+    pub framework: Option<String>,
+}
+
+/// A file through which the game takes an explicit archive load order.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct LoadOrderFile {
+    pub file: String,
+    pub extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -110,6 +178,10 @@ impl GameDefinition {
             .max_by_key(|t| t.path.len())
     }
 
+    pub fn framework(&self, id: &str) -> Option<&Framework> {
+        self.frameworks.iter().find(|f| f.id == id)
+    }
+
     pub fn from_toml(text: &str) -> Result<Self> {
         let game: Self = toml::from_str(text)?;
         game.validate()?;
@@ -141,6 +213,18 @@ impl GameDefinition {
                 return Err(invalid(format!(
                     "path '{path}' must be relative and stay inside the game folder"
                 )));
+            }
+        }
+        let known = |id: &str| self.frameworks.iter().any(|f| f.id == id);
+        let references = self
+            .requirements
+            .iter()
+            .map(|r| &r.framework)
+            .chain(self.frameworks.iter().flat_map(|f| &f.requires))
+            .chain(self.logs.iter().filter_map(|l| l.framework.as_ref()));
+        for id in references {
+            if !known(id) {
+                return Err(invalid(format!("unknown framework '{id}'")));
             }
         }
         Ok(())
@@ -182,6 +266,8 @@ mod tests {
                 .any(|t| t.kind == "archive" && t.path == "archive/pc/mod")
         );
         assert_eq!(cp.wine.dll_overrides.len(), 2);
+        assert!(cp.framework("redscript").is_some());
+        assert!(cp.load_order.is_some());
     }
 
     #[test]

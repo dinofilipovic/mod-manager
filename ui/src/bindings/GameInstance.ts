@@ -8,6 +8,18 @@ export type GameInstance = {
  */
 id: string, game_id: string, game_name: string, environment_id: string, store: Store, install_path: string, 
 /**
+ * The executable's product version, when it has one.
+ */
+version: string | null, 
+/**
+ * Steam's build id for Steam installs; changes with every game update.
+ */
+build_id: string | null, 
+/**
+ * Changes whenever the game's executable changes (size, date, build).
+ */
+fingerprint: string, 
+/**
  * State of the Wine DLL overrides the game's mod loaders need.
  */
 dll_overrides: Array<DllOverrideStatus>, };

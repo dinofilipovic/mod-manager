@@ -8,6 +8,7 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use mm_core::env::{self, crossover};
 use mm_core::library::{Library, ModMeta};
+use mm_core::requirements::FrameworkState;
 use mm_core::{Environment, EnvironmentKind, GameDefinition, GameInstance, ScanResult, game};
 
 #[derive(Parser)]
@@ -49,6 +50,11 @@ enum Command {
     /// Install mod archives into the library and enable them.
     Install {
         archives: Vec<PathBuf>,
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// Show missing frameworks, game updates and errors from the game's logs.
+    Health {
         #[arg(long)]
         instance: Option<String>,
     },
@@ -137,6 +143,18 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::Health { instance } => {
+            let (game, instance) = pick_instance(instance)?;
+            let mut library = open_library()?;
+            let loadout = library.loadout(&game, &instance)?;
+            let logs = library.logs(&game, &instance)?;
+            if cli.json {
+                let report = serde_json::json!({ "game": loadout.game, "frameworks": loadout.frameworks, "logs": logs });
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_health(&loadout, &logs);
+            }
+        }
         Command::Deploy { instance } => {
             let (game, instance) = pick_instance(instance)?;
             let report = open_library()?.deploy(&game, &instance)?;
@@ -149,6 +167,77 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn print_health(loadout: &mm_core::library::Loadout, logs: &[mm_core::health::LogReport]) {
+    let game = &loadout.game;
+    println!(
+        "Game version {} (build {})",
+        game.version.as_deref().unwrap_or("unknown"),
+        game.build_id.as_deref().unwrap_or("-")
+    );
+    if !game.outdated_frameworks.is_empty() {
+        println!(
+            "  The game was updated after these were installed: {}",
+            game.outdated_frameworks.join(", ")
+        );
+    }
+    println!("\nFrameworks:");
+    for f in &loadout.frameworks {
+        let state = match &f.state {
+            FrameworkState::Installed { mod_name } => format!("installed ({mod_name})"),
+            FrameworkState::InstalledManually => "installed manually".into(),
+            FrameworkState::Disabled { mod_name, .. } => format!("disabled ({mod_name})"),
+            FrameworkState::NotInstalled => "not installed".into(),
+        };
+        let needed = if f.needed_by.is_empty() {
+            String::new()
+        } else {
+            format!(", needed by {}", f.needed_by.join(", "))
+        };
+        println!("  {:<20} {state}{needed}", f.name);
+    }
+    for m in loadout
+        .mods
+        .iter()
+        .filter(|m| !m.missing_requirements.is_empty())
+    {
+        let names: Vec<&str> = m
+            .missing_requirements
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        println!("  ! {} needs {}", m.record.name, names.join(", "));
+    }
+    println!("\nLogs:");
+    if logs.is_empty() {
+        println!("  none yet; start the game once with mods applied");
+    }
+    for log in logs {
+        let stale = if log.stale {
+            " (from before the last apply)"
+        } else {
+            ""
+        };
+        println!(
+            "  {} [{}]: {} errors, {} warnings{stale}",
+            log.name, log.relative_path, log.error_count, log.warning_count
+        );
+        for e in log
+            .entries
+            .iter()
+            .filter(|e| e.severity == mm_core::health::Severity::Error)
+            .rev()
+            .take(3)
+        {
+            let who = e
+                .mod_name
+                .as_deref()
+                .map(|m| format!(" [{m}]"))
+                .unwrap_or_default();
+            println!("      line {}{who}: {}", e.line, e.text);
+        }
+    }
 }
 
 fn open_library() -> Result<Library> {

@@ -9,10 +9,12 @@ pub mod env;
 pub mod error;
 pub mod fs_util;
 pub mod game;
+pub mod health;
 pub mod installer;
 pub mod library;
 pub mod nexus;
 mod registry;
+pub mod requirements;
 pub mod store;
 mod vdf;
 

@@ -100,3 +100,114 @@ reason = "RED4ext loads through winmm.dll"
 
 [launch]
 modded_args = ["-modded"]
+
+# Frameworks other mods build on. `provides` are files that prove it is
+# installed; `requires` lists frameworks it needs itself.
+[[frameworks]]
+id = "cet"
+name = "Cyber Engine Tweaks"
+nexus_mod_id = 107
+provides = ["bin/x64/plugins/cyber_engine_tweaks.asi"]
+
+[[frameworks]]
+id = "red4ext"
+name = "RED4ext"
+nexus_mod_id = 2380
+provides = ["red4ext/RED4ext.dll"]
+
+[[frameworks]]
+id = "redscript"
+name = "redscript"
+nexus_mod_id = 1511
+provides = ["engine/tools/scc.exe"]
+
+[[frameworks]]
+id = "archivexl"
+name = "ArchiveXL"
+nexus_mod_id = 4198
+provides = ["red4ext/plugins/ArchiveXL/ArchiveXL.dll"]
+requires = ["red4ext"]
+
+[[frameworks]]
+id = "tweakxl"
+name = "TweakXL"
+nexus_mod_id = 4197
+provides = ["red4ext/plugins/TweakXL/TweakXL.dll"]
+requires = ["red4ext"]
+
+[[frameworks]]
+id = "codeware"
+name = "Codeware"
+nexus_mod_id = 7780
+provides = ["red4ext/plugins/Codeware/Codeware.dll"]
+requires = ["red4ext"]
+
+# Which mod files need which framework: by extension, or by folder.
+[[requirements]]
+framework = "redscript"
+extensions = ["reds"]
+
+[[requirements]]
+framework = "cet"
+paths = ["bin/x64/plugins/cyber_engine_tweaks/mods"]
+
+[[requirements]]
+framework = "archivexl"
+extensions = ["xl"]
+
+[[requirements]]
+framework = "tweakxl"
+paths = ["r6/tweaks"]
+
+[[requirements]]
+framework = "red4ext"
+paths = ["red4ext/plugins"]
+
+# Log files the game and frameworks write, relative to the install folder.
+# `*` matches within one path component. Source: RED Modding wiki,
+# "Finding and reading log files".
+[[logs]]
+name = "redscript"
+framework = "redscript"
+path = "r6/logs/redscript_rCURRENT.log"
+
+[[logs]]
+name = "RED4ext"
+framework = "red4ext"
+path = "red4ext/logs/red4ext.log"
+
+[[logs]]
+name = "ArchiveXL"
+framework = "archivexl"
+path = "red4ext/plugins/ArchiveXL/ArchiveXL.log"
+
+[[logs]]
+name = "TweakXL"
+framework = "tweakxl"
+path = "red4ext/plugins/TweakXL/TweakXL.log"
+
+[[logs]]
+name = "Codeware"
+framework = "codeware"
+path = "red4ext/plugins/Codeware/Codeware.log"
+
+[[logs]]
+name = "Cyber Engine Tweaks"
+framework = "cet"
+path = "bin/x64/plugins/cyber_engine_tweaks/cyber_engine_tweaks.log"
+
+[[logs]]
+name = "CET mod"
+path = "bin/x64/plugins/cyber_engine_tweaks/mods/*/*.log"
+
+[[logs]]
+name = "REDmod"
+path = "tools/redmod/bin/REDmodLog.txt"
+
+# Optional archive load order. The game loads archives in archive/pc/mod by
+# file name (first loaded wins). If this file exists, it uses the file's order
+# instead. Off unless the user turns it on: the modding community recommends
+# renaming files over a modlist.
+[load_order]
+file = "archive/pc/mod/modlist.txt"
+extensions = ["archive"]

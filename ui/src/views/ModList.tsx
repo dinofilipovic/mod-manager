@@ -110,6 +110,15 @@ export function ModList({
                 </span>
               </span>
               <span className="mod-badges">
+                {entry.enabled && entry.missing_requirements.length > 0 && (
+                  <span
+                    className="badge badge-error"
+                    title={`Needs ${entry.missing_requirements.map((r) => r.name).join(", ")}`}
+                  >
+                    <Icon name="alert" size={11} /> Needs {entry.missing_requirements[0].name}
+                    {entry.missing_requirements.length > 1 ? ` +${entry.missing_requirements.length - 1}` : ""}
+                  </span>
+                )}
                 {m.update_file_id && <span className="badge badge-update">Update {m.update_version ?? ""}</span>}
                 {entry.enabled && entry.overridden_by.length > 0 && (
                   <span className="badge badge-lose" title={`Overridden by ${entry.overridden_by.join(", ")}`}>

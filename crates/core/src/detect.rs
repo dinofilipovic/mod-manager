@@ -34,6 +34,12 @@ pub struct GameInstance {
     pub environment_id: String,
     pub store: Store,
     pub install_path: PathBuf,
+    /// The executable's product version, when it has one.
+    pub version: Option<String>,
+    /// Steam's build id for Steam installs; changes with every game update.
+    pub build_id: Option<String>,
+    /// Changes whenever the game's executable changes (size, date, build).
+    pub fingerprint: String,
     /// State of the Wine DLL overrides the game's mod loaders need.
     pub dll_overrides: Vec<DllOverrideStatus>,
 }
@@ -84,16 +90,68 @@ pub fn detect_game(game: &GameDefinition, env: &Environment) -> Vec<GameInstance
         })
         .map(|(store, path)| (store, canonical_or_self(path)))
         .filter(|(_, path)| seen.insert(path.clone()))
-        .map(|(store, install_path)| GameInstance {
-            id: instance_id(&game.id, &env.id, &install_path),
-            game_id: game.id.clone(),
-            game_name: game.name.clone(),
-            environment_id: env.id.clone(),
-            store,
-            install_path,
-            dll_overrides: dll_override_status(game, &overrides),
+        .map(|(store, install_path)| {
+            let exe = resolve_case_insensitive(&install_path, &game.executable);
+            let build_id = (store == Store::Steam)
+                .then(|| steam_build_id(game, &install_path))
+                .flatten();
+            let fingerprint = exe
+                .as_deref()
+                .and_then(|e| fs::metadata(e).ok())
+                .map(|m| {
+                    let modified = m
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_secs());
+                    format!(
+                        "{}:{modified}:{}",
+                        m.len(),
+                        build_id.as_deref().unwrap_or("")
+                    )
+                })
+                .unwrap_or_default();
+            GameInstance {
+                id: instance_id(&game.id, &env.id, &install_path),
+                game_id: game.id.clone(),
+                game_name: game.name.clone(),
+                environment_id: env.id.clone(),
+                store,
+                version: exe.as_deref().and_then(exe_version),
+                build_id,
+                fingerprint,
+                install_path,
+                dll_overrides: dll_override_status(game, &overrides),
+            }
         })
         .collect()
+}
+
+/// The product version in a Windows executable's version resource.
+pub fn exe_version(exe: &std::path::Path) -> Option<String> {
+    use pelite::pe64::Pe;
+    let map = pelite::FileMap::open(exe).ok()?;
+    let file = pelite::pe64::PeFile::from_bytes(map.as_ref()).ok()?;
+    let info = file.resources().ok()?.version_info().ok()?;
+    let from_strings = info
+        .translation()
+        .first()
+        .and_then(|lang| info.value(*lang, "ProductVersion"))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    from_strings.or_else(|| info.fixed().map(|f| f.dwProductVersion.to_string()))
+}
+
+/// Steam's build id from the app manifest next to a Steam library install
+/// (`<library>/steamapps/common/<game>` -> `<library>/steamapps/appmanifest_<id>.acf`).
+fn steam_build_id(game: &GameDefinition, install_path: &std::path::Path) -> Option<String> {
+    let app_id = game.stores.steam_app_id.as_ref()?;
+    let steamapps = install_path.parent()?.parent()?;
+    let manifest = read_vdf(steamapps, &format!("appmanifest_{app_id}.acf"))?;
+    manifest
+        .get("AppState")?
+        .get_str("buildid")
+        .map(String::from)
 }
 
 /// `<game>-<hash>`, using FNV-1a so the id never changes between builds.

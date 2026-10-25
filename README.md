@@ -36,12 +36,23 @@ files, not code.
   game folder as copy-on-write clones (APFS, Btrfs, XFS, ReFS), else hard links
   or copies. Original game files a mod replaces are backed up and restored.
   *Remove all mods from game folder* undoes everything.
+- **Missing requirements.** Knows which frameworks mods build on (Cyber Engine
+  Tweaks, RED4ext, redscript, ArchiveXL, TweakXL, Codeware). A mod whose
+  framework is missing or disabled is flagged with a one-click *Enable* or a
+  link to get it.
+- **Health tab.** Shows the game version and Steam build, warns when the game
+  was updated after your script extenders were installed, and reads the logs
+  of every framework and CET mod, listing errors next to the mod that caused
+  them.
+- **Archive load order.** By file name (the game's default), or optionally by
+  your mod list: the app then writes `archive/pc/mod/modlist.txt` so mods lower
+  in the list win.
 - **Wine setup in one click.** Detects the `version` and `winmm` DLL overrides
   Cyber Engine Tweaks and RED4ext need, and sets them in the bottle.
 - **Play.** Applies pending changes, then starts the game through the bottle's
   Steam client (or the game executable) with `-modded` for REDmod.
-- **Command line.** `mm detect`, `mm mods`, `mm install`, `mm deploy`,
-  `mm purge`, handy on Linux or a Steam Deck.
+- **Command line.** `mm detect`, `mm mods`, `mm health`, `mm install`,
+  `mm deploy`, `mm purge`, handy on Linux or a Steam Deck.
 
 ### Not yet
 

@@ -67,13 +67,14 @@ impl Environment {
             return None;
         }
         let drive = drive.to_ascii_lowercase();
-        let mapped = self.prefix.join("dosdevices").join(format!("{drive}:"));
-        let base = if mapped.exists() {
-            mapped
-        } else if drive == "c" {
-            self.c_drive()
-        } else {
-            return None;
+        // `dosdevices/c:` can't be named on Windows, where `c:` is a drive.
+        let mapped = (!cfg!(windows))
+            .then(|| self.prefix.join("dosdevices").join(format!("{drive}:")))
+            .filter(|p| p.exists());
+        let base = match mapped {
+            Some(path) => path,
+            None if drive == "c" => self.c_drive(),
+            None => return None,
         };
         Some(resolve_case_insensitive(&base, rest).unwrap_or_else(|| {
             rest.split(['/', '\\'])

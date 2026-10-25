@@ -20,3 +20,9 @@ tauri-plugin-opener = "2"
 tauri-plugin-single-instance = { version = "2.5.4", features = ["deep-link"] }
 ts-rs.workspace = true
 uuid = { version = "1.29.0", features = ["v4"] }
+
+# tauri-plugin-deep-link 2.6.2 doesn't compile against rust-ini 0.21.2+, which
+# added required fields to `ParseOption`. Hold rust-ini back until the plugin
+# is updated.
+[target.'cfg(target_os = "linux")'.dependencies]
+rust-ini = "=0.21.1"
