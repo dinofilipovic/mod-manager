@@ -28,19 +28,32 @@ files, not code.
   installs into the app. Archives you add yourself are matched on Nexus by the
   mod id in their file name, so they get a proper name, author, image and update
   alerts too.
-- **Update checks.** Premium accounts update in one click; free accounts get a
-  link straight to the right files page.
+- **Update checks.** Only mods that changed on Nexus since the last check are
+  looked at, once a day and after game updates. Premium accounts update in one
+  click (or all at once); free accounts get links to the right files pages.
+  Pin a version, skip an update, read the changelog.
+- **Versions.** Every archive is kept (how many per mod is a setting), so a
+  mod can be rolled back, reinstalled or installed with other installer
+  options; the options chosen are used again for updates.
 - **Profiles** per game install, each with its own enabled mods and load order.
 - **Load order and conflicts.** Drag to reorder; lower in the list wins. Every
   mod shows which mods it overrides or is overridden by.
 - **Safe deployment.** Mods stay unpacked in the library and are placed in the
   game folder as copy-on-write clones (APFS, Btrfs, XFS, ReFS), else hard links
   or copies. Original game files a mod replaces are backed up and restored.
+  Every step is journaled, so an interrupted apply is finished or undone; files
+  a game update replaced or you edited by hand are noticed and kept.
   *Remove all mods from game folder* undoes everything.
-- **Missing requirements.** Knows which frameworks mods build on (Cyber Engine
-  Tweaks, RED4ext, redscript, ArchiveXL, TweakXL, Codeware). A mod whose
-  framework is missing or disabled is flagged with a one-click *Enable* or a
-  link to get it.
+- **Requirements.** Knows which frameworks mods build on (Cyber Engine Tweaks,
+  RED4ext, redscript, ArchiveXL, TweakXL, Codeware, Mod Settings, Native
+  Settings UI, Input Loader) and which versions a game version needs, reads
+  each mod's requirements from Nexus Mods, and takes your own. Missing,
+  disabled and too-old requirements are flagged with *Enable* or *Get*.
+- **Checks before Play.** Mod files are checked at install, and Play lists
+  what would keep mods from working first. The mod list shows whether each
+  mod loaded, from the frameworks' logs, and which `.archive` mods change the
+  same game resources.
+- **Adopt hand-installed mods** found in the game folder, without moving them.
 - **Health tab.** Shows the game version and Steam build, warns when the game
   was updated after your script extenders were installed, and reads the logs
   of every framework and CET mod, listing errors next to the mod that caused
@@ -65,13 +78,17 @@ files, not code.
   launcher, GOG games directly (DRM-free). Proton games get the Steam launch
   options to paste.
 - **App updates.** The app checks GitHub Releases at startup and updates itself.
-- **Command line.** `mm detect`, `mm mods`, `mm health`, `mm install`,
-  `mm deploy`, `mm purge`, handy on Linux or a Steam Deck.
+- **Command line.** `mm detect`, `mods`, `health`, `install`, `deploy`,
+  `purge`, `enable`, `disable`, `profiles`, `check-updates`, `update`,
+  `rollback`, `verify`, `preflight`, `deps`, `archives`, `adopt`, all with
+  `--json`, handy on Linux or a Steam Deck. `scripts/cli-smoke.sh` runs the
+  whole lifecycle against a fake bottle.
 
 ### Not yet
 
 FOMOD C# script installers, reproducing a collection curator's installer
-choices, games whose mods live outside the game folder (e.g. Baldur's Gate 3)
+choices, compiling redscript before launch to report script errors per mod,
+load status for archive and TweakXL mods (they don't log loading), games whose mods live outside the game folder (e.g. Baldur's Gate 3)
 or need plugin load orders (Bethesda games), and macOS code signing (needs an
 Apple Developer account; the release workflow signs as soon as its secrets are
 set).
