@@ -745,7 +745,10 @@ impl Library {
                 .find_map(|r| r.fomod_choices);
         }
         if let Some(parsed) = archive_name.as_deref().map(parse_archive_name) {
-            meta.name = meta.name.or(Some(parsed.name));
+            // A name guessed from a file name doesn't rename a mod being updated.
+            if meta.replaces.is_none() {
+                meta.name = meta.name.or(Some(parsed.name));
+            }
             meta.version = meta.version.or(parsed.version);
             meta.nexus_mod_id = meta.nexus_mod_id.or(parsed.nexus_mod_id);
         }

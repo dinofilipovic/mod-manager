@@ -67,7 +67,7 @@ enum Command {
     },
     /// Go back to the previous kept version of a mod.
     Rollback {
-        /// Mod id (see `mm mods --json`).
+        /// Mod id or name (see `mm mods`).
         #[arg(long = "mod")]
         mod_id: String,
         #[arg(long)]
@@ -102,6 +102,79 @@ enum Command {
         #[arg(long)]
         instance: Option<String>,
     },
+    /// Enable a mod in the active profile (by id or name).
+    Enable {
+        #[arg(long = "mod")]
+        mod_ref: String,
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// Disable a mod in the active profile (by id or name).
+    Disable {
+        #[arg(long = "mod")]
+        mod_ref: String,
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// List, create or switch profiles.
+    Profiles {
+        #[command(subcommand)]
+        action: Option<ProfileAction>,
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// Ask Nexus Mods which mods have updates (needs NEXUS_API_KEY or a key
+    /// saved by the app).
+    CheckUpdates {
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// Update a mod: from an archive you downloaded, or from Nexus Mods
+    /// (Premium) when a check found an update.
+    Update {
+        #[arg(long = "mod")]
+        mod_ref: String,
+        #[arg(long)]
+        archive: Option<PathBuf>,
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// List the archive store, or clean archives no mod uses.
+    Archives {
+        #[command(subcommand)]
+        action: Option<ArchivesAction>,
+    },
+    /// List mods installed by hand, or adopt one by name.
+    Adopt {
+        /// The group to adopt (see the list); without it, only lists.
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        instance: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProfileAction {
+    List,
+    /// Create a profile and make it active.
+    Create {
+        name: String,
+        /// Start from the active profile's mod list.
+        #[arg(long)]
+        copy: bool,
+    },
+    /// Make a profile active (by id or name).
+    Switch {
+        profile: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ArchivesAction {
+    List,
+    /// Delete archives that no installed mod was installed from.
+    Clean,
 }
 
 fn main() -> Result<()> {
@@ -195,6 +268,7 @@ fn main() -> Result<()> {
         Command::Rollback { mod_id, instance } => {
             let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
             let mut library = open_library()?;
+            let mod_id = find_mod(&library, &game, &mod_id)?.id;
             let prepared = library.rollback(&game, &mod_id, Some(&instance.id))?;
             report_prepared(&mut library, &game, prepared, cli.json)?;
         }
@@ -205,6 +279,7 @@ fn main() -> Result<()> {
         } => {
             let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
             let mut library = open_library()?;
+            let mod_id = find_mod(&library, &game, &mod_id)?.id;
             let revision = match revision {
                 Some(r) => r,
                 None => library
@@ -278,6 +353,201 @@ fn main() -> Result<()> {
             }
             if preflight.has_errors() {
                 std::process::exit(2);
+            }
+        }
+        Command::Enable { mod_ref, instance } => {
+            set_enabled(
+                &mod_ref,
+                instance,
+                true,
+                cli.json,
+                cli.bottles_dir.as_deref(),
+            )?;
+        }
+        Command::Disable { mod_ref, instance } => {
+            set_enabled(
+                &mod_ref,
+                instance,
+                false,
+                cli.json,
+                cli.bottles_dir.as_deref(),
+            )?;
+        }
+        Command::Profiles { action, instance } => {
+            let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
+            let mut library = open_library()?;
+            match action {
+                None | Some(ProfileAction::List) => {}
+                Some(ProfileAction::Create { name, copy }) => {
+                    let source = if copy {
+                        Some(library.ensure_active_profile(&instance.id)?)
+                    } else {
+                        None
+                    };
+                    library.create_profile(&instance.id, &name, source.as_deref())?;
+                }
+                Some(ProfileAction::Switch { profile }) => {
+                    let loadout = library.loadout(&game, &instance)?;
+                    let found = loadout
+                        .profiles
+                        .iter()
+                        .find(|p| p.id == profile || p.name.eq_ignore_ascii_case(&profile))
+                        .with_context(|| format!("no profile \"{profile}\" (see `mm profiles`)"))?;
+                    library.set_active_profile(&instance.id, &found.id)?;
+                }
+            }
+            let loadout = library.loadout(&game, &instance)?;
+            if cli.json {
+                let report = serde_json::json!({
+                    "profiles": loadout.profiles,
+                    "active_profile_id": loadout.active_profile_id,
+                });
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                for p in &loadout.profiles {
+                    let mark = if p.id == loadout.active_profile_id {
+                        "*"
+                    } else {
+                        " "
+                    };
+                    println!("{mark} {}  ({})", p.name, p.id);
+                }
+            }
+        }
+        Command::CheckUpdates { instance } => {
+            let (game, _) = pick_instance(instance, cli.bottles_dir.as_deref())?;
+            let library = open_library()?;
+            let key = nexus_key()?;
+            let client = mm_core::nexus::NexusClient::new(&key, env!("CARGO_PKG_VERSION"))?;
+            let check = library
+                .update_check(&game)?
+                .context("this game isn't on Nexus Mods")?;
+            let now = mm_core::library::now();
+            let period = mm_core::updates::period_since(check.last_checked_at, now);
+            let outcome = mm_core::updates::run(&client, &check, now, &|| Ok(()))?;
+            let summary = library.apply_update_check(&outcome, period)?;
+            let _ = library.save_rate_limits();
+            let mods = library.mods_for_game(&game.id)?;
+            let updates: Vec<_> = mods.iter().filter(|m| m.update_file_id.is_some()).collect();
+            if cli.json {
+                let report = serde_json::json!({ "summary": summary, "updates": updates });
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "Looked at {} mods with {} requests.",
+                    summary.checked, summary.requests
+                );
+                for m in &updates {
+                    println!(
+                        "    {} {} -> {}",
+                        m.name,
+                        m.version.as_deref().unwrap_or("?"),
+                        m.update_version.as_deref().unwrap_or("newer")
+                    );
+                }
+                if updates.is_empty() {
+                    println!("All mods are up to date.");
+                }
+            }
+        }
+        Command::Update {
+            mod_ref,
+            archive,
+            instance,
+        } => {
+            let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
+            let mut library = open_library()?;
+            let record = find_mod(&library, &game, &mod_ref)?;
+            let archive = match archive {
+                Some(path) => path,
+                None => download_update(&library, &game, &record)?,
+            };
+            let meta = ModMeta {
+                replaces: Some(record.id.clone()),
+                nexus_mod_id: record.nexus_mod_id,
+                nexus_file_id: record
+                    .update_file_id
+                    .filter(|_| record.nexus_mod_id.is_some()),
+                ..Default::default()
+            };
+            let job = library.begin_install(&game, &archive, meta, Some(&instance.id))?;
+            let extracted = job.extract(&game)?;
+            let prepared = library.complete_install(&game, extracted)?;
+            report_prepared(&mut library, &game, prepared, cli.json)?;
+        }
+        Command::Archives { action } => {
+            let library = open_library()?;
+            if matches!(action, Some(ArchivesAction::Clean)) {
+                let (count, bytes) = library.clean_unused_archives()?;
+                if cli.json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "deleted": count, "bytes": bytes })
+                    );
+                } else {
+                    println!(
+                        "Deleted {count} unused archives ({} MB).",
+                        bytes / 1_000_000
+                    );
+                }
+            } else {
+                let usage = library.archive_usage()?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&usage)?);
+                } else {
+                    for u in &usage {
+                        println!(
+                            "{:>10} KB  {}  {}",
+                            u.archive.size / 1000,
+                            u.archive
+                                .original_name
+                                .as_deref()
+                                .unwrap_or(&u.archive.path),
+                            if u.unused {
+                                "(unused)".to_string()
+                            } else {
+                                u.mods.join(", ")
+                            }
+                        );
+                    }
+                    println!("Keeping: {:?}", library.archive_retention());
+                }
+            }
+        }
+        Command::Adopt { name, instance } => {
+            let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
+            let mut library = open_library()?;
+            let groups = library.unowned_mods(&game, &instance)?;
+            match name {
+                None => {
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&groups)?);
+                    } else if groups.is_empty() {
+                        println!("No hand-installed mods found.");
+                    } else {
+                        for g in &groups {
+                            println!("{}  ({}, {} files)", g.name, g.kind, g.files.len());
+                        }
+                        println!("\nAdopt one with `mm adopt --name <name>`.");
+                    }
+                }
+                Some(name) => {
+                    let group = groups
+                        .iter()
+                        .find(|g| g.name.eq_ignore_ascii_case(&name))
+                        .with_context(|| {
+                            format!("no hand-installed mod named \"{name}\" (see `mm adopt`)")
+                        })?;
+                    let outcome = library.adopt(&game, &instance, &group.name, &group.files)?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&outcome)?);
+                    } else {
+                        println!(
+                            "Adopted {} ({} files); the game folder wasn't changed.",
+                            outcome.record.name, outcome.record.file_count
+                        );
+                    }
+                }
             }
         }
         Command::Verify { instance } => {
@@ -424,6 +694,102 @@ fn print_health(loadout: &mm_core::library::Loadout, logs: &[mm_core::health::Lo
             println!("      line {}{who}: {}", e.line, e.text);
         }
     }
+}
+
+/// Enables or disables a mod in the active profile and says what it means.
+fn set_enabled(
+    mod_ref: &str,
+    instance: Option<String>,
+    enable: bool,
+    json: bool,
+    bottles_dir: Option<&Path>,
+) -> Result<()> {
+    let (game, instance) = pick_instance(instance, bottles_dir)?;
+    let mut library = open_library()?;
+    let record = find_mod(&library, &game, mod_ref)?;
+    // Others that need it lose it: say so (the app asks first).
+    let dependents = library.dependents(&game, &instance, &record.id)?;
+    library.set_mod_enabled(&game, &instance.id, &record.id, enable)?;
+    let loadout = library.loadout(&game, &instance)?;
+    let entry = loadout.mods.iter().find(|m| m.record.id == record.id);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entry)?);
+    } else {
+        println!(
+            "{} {}.",
+            if enable { "Enabled" } else { "Disabled" },
+            record.name
+        );
+        if !enable && !dependents.is_empty() {
+            println!("    warning: {} need it", dependents.join(", "));
+        }
+        println!("Run `mm deploy` to apply.");
+    }
+    Ok(())
+}
+
+/// A mod of the game by id, or by name when only one has it.
+fn find_mod(
+    library: &Library,
+    game: &GameDefinition,
+    query: &str,
+) -> Result<mm_core::store::ModRecord> {
+    let mods = library.mods_for_game(&game.id)?;
+    if let Some(m) = mods.iter().find(|m| m.id == query) {
+        return Ok(m.clone());
+    }
+    let named: Vec<_> = mods
+        .iter()
+        .filter(|m| m.name.eq_ignore_ascii_case(query))
+        .collect();
+    match named.as_slice() {
+        [only] => Ok((*only).clone()),
+        [] => bail!("no mod \"{query}\" (see `mm mods`)"),
+        _ => bail!("several mods are called \"{query}\"; use its id (see `mm mods --json`)"),
+    }
+}
+
+/// The Nexus API key: `NEXUS_API_KEY`, else the one the app saved.
+fn nexus_key() -> Result<String> {
+    if let Ok(key) = std::env::var("NEXUS_API_KEY")
+        && !key.trim().is_empty()
+    {
+        return Ok(key);
+    }
+    mm_core::nexus::api_key::load()?
+        .context("no Nexus Mods API key: set NEXUS_API_KEY or connect your account in the app")
+}
+
+/// Downloads the update a check found (Nexus Premium), into the library's
+/// downloads folder.
+fn download_update(
+    library: &Library,
+    game: &GameDefinition,
+    record: &mm_core::store::ModRecord,
+) -> Result<PathBuf> {
+    let (Some(mod_id), Some(file_id), Some(domain)) = (
+        record.nexus_mod_id,
+        record.update_file_id,
+        game.stores.nexus_domain.as_deref(),
+    ) else {
+        bail!(
+            "no update is known for {}; run `mm check-updates`, or pass --archive",
+            record.name
+        );
+    };
+    let client = mm_core::nexus::NexusClient::new(&nexus_key()?, env!("CARGO_PKG_VERSION"))?;
+    let url = client.download_url(domain, mod_id, file_id, None, None).context(
+        "downloading directly needs Nexus Mods Premium; download the file on its page and pass --archive",
+    )?;
+    let file = client.file_info(domain, mod_id, file_id)?;
+    let name = file
+        .file_name
+        .unwrap_or_else(|| format!("{mod_id}-{file_id}.zip"));
+    let dest = library
+        .downloads_dir()
+        .join(mm_core::installer::sanitize_folder_name(&name));
+    client.download(&url, &dest, |_, _| true)?;
+    Ok(dest)
 }
 
 /// Prints an install result. Without someone to ask, a changed installer
