@@ -118,6 +118,11 @@ pub fn tail(path: &Path, max_lines: usize) -> std::io::Result<Vec<String>> {
     Ok(lines[lines.len().saturating_sub(max_lines)..].to_vec())
 }
 
+/// The files a log path pattern matches in the game folder.
+pub fn log_paths_for(install_path: &Path, pattern: &str) -> Vec<PathBuf> {
+    expand(install_path, pattern)
+}
+
 /// Game-relative paths of every log the game definition knows about.
 pub fn log_paths(game: &GameDefinition, install_path: &Path) -> Vec<PathBuf> {
     game.logs

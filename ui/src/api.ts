@@ -118,6 +118,7 @@ export const api = {
     invoke<Loadout>("add_dependency", { instanceId, modId, kind, target, optional }),
   removeDependency: (instanceId: string, modId: string, kind: DependencyKind, target: string) =>
     invoke<Loadout>("remove_dependency", { instanceId, modId, kind, target }),
+  refreshModStatus: (instanceId: string) => invoke<Loadout>("refresh_mod_status", { instanceId }),
   preflight: (instanceId: string) => invoke<Preflight>("preflight", { instanceId }),
   getMissing: (instanceId: string) => invoke<UpdateAllResult>("get_missing", { instanceId }),
   modRevisions: (modId: string) => invoke<RevisionInfo[]>("mod_revisions", { modId }),

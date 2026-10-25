@@ -39,6 +39,7 @@ use crate::nexus::{NexusMatch, parse_archive_name};
 use crate::preflight::Preflight;
 use crate::requirements::{self, FrameworkState, FrameworkStatus, MissingRequirement, ModFiles};
 use crate::saves;
+use crate::status::{ModStatus, StatusMod};
 use crate::store::{ModFile, ModRecord, ModRevision, Profile, ProfileEntry, Store};
 use crate::updates::{CheckOutcome, UpdateCheck, UpdateSummary};
 use crate::validate::{self, CheckResult};
@@ -166,6 +167,8 @@ pub struct LoadoutMod {
     pub checks: Vec<CheckResult>,
     /// A check says it won't load.
     pub wont_load: bool,
+    /// Whether the logs say it loaded, as of the last refresh.
+    pub status: Option<ModStatus>,
 }
 
 const PROFILE_FORMAT: &str = "mod-manager-profile";
@@ -2112,6 +2115,7 @@ impl Library {
         };
         self.set_framework_versions(game, instance, &mut analysis.frameworks, &mods);
         let mut checks = self.mod_checks(game, &mods)?;
+        let mut statuses = self.store.mod_statuses(&instance.id)?;
         let mut dependencies = {
             let nodes: Vec<ModNode> = entries
                 .iter()
@@ -2169,6 +2173,7 @@ impl Library {
                         .get(&e.mod_id)
                         .is_some_and(|c| validate::wont_load(c)),
                     checks: checks.remove(&e.mod_id).unwrap_or_default(),
+                    status: statuses.remove(&e.mod_id).filter(|_| e.enabled),
                 })
             })
             .collect();
@@ -2591,6 +2596,51 @@ impl Library {
             &hints,
             applied_at,
         ))
+    }
+
+    /// Reads the logs again for whether each enabled mod loaded, and keeps
+    /// the result for the mod list.
+    pub fn refresh_mod_status(
+        &mut self,
+        game: &GameDefinition,
+        instance: &GameInstance,
+    ) -> Result<BTreeMap<String, ModStatus>> {
+        let reports = self.logs(game, instance)?;
+        let profile_id = self.ensure_active_profile(&instance.id)?;
+        let mods: HashMap<String, ModRecord> = self
+            .store
+            .mods_for_game(&game.id)?
+            .into_iter()
+            .map(|m| (m.id.clone(), m))
+            .collect();
+        let mut enabled = Vec::new();
+        for e in self
+            .effective_entries(&game.id, &profile_id)?
+            .iter()
+            .filter(|e| e.enabled)
+        {
+            if let Some(m) = mods.get(&e.mod_id) {
+                enabled.push((m, self.store.mod_files(&m.id)?));
+            }
+        }
+        let nodes: Vec<StatusMod> = enabled
+            .iter()
+            .map(|(m, files)| StatusMod {
+                id: &m.id,
+                name: &m.name,
+                files,
+            })
+            .collect();
+        let statuses = crate::status::statuses(
+            game,
+            &instance.install_path,
+            &nodes,
+            self.store.deployed_at(&instance.id)?,
+            &reports,
+        );
+        self.store
+            .set_mod_statuses(&instance.id, &statuses, now())?;
+        Ok(statuses)
     }
 
     /// The end of one of the game's known logs. Only paths the game

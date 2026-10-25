@@ -3,6 +3,14 @@ import type { LoadoutMod } from "../bindings/LoadoutMod";
 import { Icon } from "../components/Icon";
 import { KIND_LABELS, formatBytes } from "../format";
 import { isUnmet, stateLabel, unmetSummary } from "../deps";
+import type { LoadStatus } from "../bindings/LoadStatus";
+
+const STATUS_TEXT: Record<LoadStatus, string> = {
+  Loaded: "Loaded",
+  Errors: "Errors",
+  NotSeen: "Not seen",
+  CantVerify: "",
+};
 
 type Drag = { id: string; from: number; over: number };
 
@@ -112,6 +120,11 @@ export function ModList({
                 </span>
               </span>
               <span className="mod-badges">
+                {entry.enabled && entry.status && entry.status.status !== "CantVerify" && (
+                  <span className={`status-dot status-${entry.status.status}`} title={entry.status.detail}>
+                    {STATUS_TEXT[entry.status.status]}
+                  </span>
+                )}
                 {entry.wont_load && (
                   <span className="badge badge-error" title={entry.checks.map((c) => c.message).join("\n")}>
                     <Icon name="alert" size={11} /> Won't load

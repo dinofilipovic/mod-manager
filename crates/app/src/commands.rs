@@ -1112,6 +1112,19 @@ pub async fn cancel_fomod(app: AppHandle, token: String) -> CommandResult<()> {
     .await
 }
 
+/// Reads the game's logs again for whether each mod loaded.
+#[tauri::command]
+pub async fn refresh_mod_status(app: AppHandle, instance_id: String) -> LoadoutResult {
+    blocking(app, move |_, state| {
+        let (instance, game, _) = state.resolve(&instance_id)?;
+        lock(&state.library)
+            .refresh_mod_status(game, &instance)
+            .map_err(err)?;
+        loadout(state, &instance_id)
+    })
+    .await
+}
+
 /// What would keep mods from working if the game started now.
 #[tauri::command]
 pub async fn preflight(app: AppHandle, instance_id: String) -> CommandResult<Preflight> {

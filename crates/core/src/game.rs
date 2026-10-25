@@ -144,6 +144,26 @@ pub struct LogSource {
     /// Game-relative path; `*` matches within one path component.
     pub path: String,
     pub framework: Option<String>,
+    /// How the log confirms that mods loaded, if it does.
+    pub status: Option<LogStatus>,
+}
+
+/// How a log tells that a mod of one kind loaded. Patterns contain `{name}`
+/// (the mod's folder under its layout path, compared without regard to
+/// case); a leading `^` anchors a pattern at the start of a line.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct LogStatus {
+    /// The layout kind whose mods this log covers.
+    pub kind: String,
+    pub loaded: String,
+    #[serde(default)]
+    pub failed: Option<String>,
+    /// Text the log must also contain for `loaded` to count (a run that
+    /// finished).
+    #[serde(default)]
+    pub needs: Option<String>,
 }
 
 /// A file through which the game takes an explicit archive load order.

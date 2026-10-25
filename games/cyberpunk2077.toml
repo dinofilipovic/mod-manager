@@ -233,15 +233,27 @@ paths = ["red4ext/plugins"]
 # Log files the game and frameworks write, relative to the install folder.
 # `*` matches within one path component. Source: RED Modding wiki,
 # "Finding and reading log files".
+#
+# `status` says how a log confirms that mods of one kind loaded; patterns use
+# `{name}` for the mod's folder and `^` for a line start.
+
+# redscript 0.5.32 (scc/lib/src/lib.rs, compiler/src/source_map.rs): lists the
+# compiled files one per line under "Compiling files in <r6\scripts>:", then
+# logs "Compilation complete" when it worked.
 [[logs]]
 name = "redscript"
 framework = "redscript"
 path = "r6/logs/redscript_rCURRENT.log"
+status = { kind = "redscript", loaded = "^{name}\\", needs = "Compilation complete" }
 
+# RED4ext (src/dll/App.cpp, Systems/PluginSystem.cpp): one log per start,
+# red4ext-<date>-<time>.log; "<plugin> (version: ..., author(s): ...) has
+# been loaded", or "Could not load plugin '<file name>'".
 [[logs]]
 name = "RED4ext"
 framework = "red4ext"
-path = "red4ext/logs/red4ext.log"
+path = "red4ext/logs/red4ext-*.log"
+status = { kind = "red4ext", loaded = "] {name} (version: ", failed = "Could not load plugin '{name}'" }
 
 [[logs]]
 name = "ArchiveXL"
@@ -262,6 +274,15 @@ path = "red4ext/plugins/Codeware/Codeware.log"
 name = "Cyber Engine Tweaks"
 framework = "cet"
 path = "bin/x64/plugins/cyber_engine_tweaks/cyber_engine_tweaks.log"
+
+# CET (src/scripting/Scripting.cpp, ScriptStore.cpp): mods are reported in
+# scripting.log as "Mod <folder> loaded!" or "Mod <folder> failed to load!".
+# CET writes info lines when the game closes or a warning comes.
+[[logs]]
+name = "CET scripts"
+framework = "cet"
+path = "bin/x64/plugins/cyber_engine_tweaks/scripting.log"
+status = { kind = "cet", loaded = "Mod {name} loaded!", failed = "Mod {name} failed to load!" }
 
 [[logs]]
 name = "CET mod"

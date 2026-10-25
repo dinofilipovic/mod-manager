@@ -104,6 +104,26 @@ export function GameView({
     }
   }, [id, toast]);
 
+  // The logs say which mods loaded: read them when coming back from the
+  // game (window focus) and when Health opens.
+  const refreshStatus = useCallback(async () => {
+    try {
+      setLoadout(await api.refreshModStatus(id));
+    } catch {
+      // Status is a hint; the mod list works without it.
+    }
+  }, [id]);
+
+  useEffect(() => {
+    void refreshStatus();
+    window.addEventListener("focus", refreshStatus);
+    return () => window.removeEventListener("focus", refreshStatus);
+  }, [refreshStatus]);
+
+  useEffect(() => {
+    if (tab === "health") void refreshStatus();
+  }, [tab, refreshStatus]);
+
   useEffect(() => {
     void reload();
     const unlisten = events.libraryChanged(() => void reload());

@@ -23,6 +23,7 @@ pub mod queue;
 mod registry;
 pub mod requirements;
 pub mod saves;
+pub mod status;
 pub mod store;
 pub mod updates;
 pub mod validate;

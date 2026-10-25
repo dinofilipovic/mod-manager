@@ -2216,3 +2216,25 @@ button.small {
 .preflight-list p {
   margin: 2px 0 0;
 }
+
+.status-dot {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.status-dot.status-Loaded {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.status-dot.status-Errors {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.status-dot.status-NotSeen {
+  color: var(--muted);
+  background: var(--surface-2);
+}

@@ -3,6 +3,7 @@ import type { CheckResult } from "./CheckResult";
 import type { DependencyStatus } from "./DependencyStatus";
 import type { MissingRequirement } from "./MissingRequirement";
 import type { ModRecord } from "./ModRecord";
+import type { ModStatus } from "./ModStatus";
 
 export type LoadoutMod = { mod: ModRecord, enabled: boolean, 
 /**
@@ -37,4 +38,8 @@ checks: Array<CheckResult>,
 /**
  * A check says it won't load.
  */
-wont_load: boolean, };
+wont_load: boolean, 
+/**
+ * Whether the logs say it loaded, as of the last refresh.
+ */
+status: ModStatus | null, };

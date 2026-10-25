@@ -10,6 +10,7 @@ use crate::archives::{ArchiveRecord, ArchiveSource};
 use crate::dependencies::{Dependency, DependencyKind, DependencySource};
 use crate::error::Result;
 use crate::nexus::{Changelog, Download, DownloadStatus};
+use crate::status::ModStatus;
 use crate::validate::CheckResult;
 
 pub const SCHEMA_VERSION: i32 = 3;
@@ -150,6 +151,14 @@ CREATE TABLE mod_checks (
     revision INTEGER NOT NULL,
     results TEXT NOT NULL,
     PRIMARY KEY (mod_id)
+);
+
+CREATE TABLE mod_status (
+    instance_id TEXT NOT NULL,
+    mod_id TEXT NOT NULL REFERENCES mods(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    checked_at INTEGER NOT NULL,
+    PRIMARY KEY (instance_id, mod_id)
 );
 
 CREATE TABLE changelogs (
@@ -715,6 +724,56 @@ impl Store {
                 serde_json::to_string(results).unwrap_or_else(|_| "[]".into())
             ],
         )?;
+        Ok(())
+    }
+
+    // Load status
+
+    pub fn mod_statuses(
+        &self,
+        instance_id: &str,
+    ) -> Result<std::collections::HashMap<String, ModStatus>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT mod_id, status FROM mod_status WHERE instance_id = ?1")?;
+        let rows = stmt.query_map([instance_id], |r| {
+            let status: String = r.get(1)?;
+            Ok((r.get::<_, String>(0)?, status))
+        })?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (mod_id, status) = row?;
+            if let Ok(status) = serde_json::from_str(&status) {
+                out.insert(mod_id, status);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Replaces an install's load statuses.
+    pub fn set_mod_statuses(
+        &mut self,
+        instance_id: &str,
+        statuses: &std::collections::BTreeMap<String, ModStatus>,
+        at: i64,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM mod_status WHERE instance_id = ?1",
+            [instance_id],
+        )?;
+        for (mod_id, status) in statuses {
+            tx.execute(
+                "INSERT INTO mod_status (instance_id, mod_id, status, checked_at) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    instance_id,
+                    mod_id,
+                    serde_json::to_string(status).unwrap_or_default(),
+                    at
+                ],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
