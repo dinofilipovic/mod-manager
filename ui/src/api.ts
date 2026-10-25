@@ -27,6 +27,10 @@ import type { LogReport } from "./bindings/LogReport";
 import type { NexusStatus } from "./bindings/NexusStatus";
 import type { NexusUser } from "./bindings/NexusUser";
 import type { ScanResult } from "./bindings/ScanResult";
+import type { ModChangelog } from "./bindings/ModChangelog";
+import type { RateLimits } from "./bindings/RateLimits";
+import type { UpdateAllResult } from "./bindings/UpdateAllResult";
+import type { UpdateCheckResult } from "./bindings/UpdateCheckResult";
 
 export const api = {
   appInfo: () => invoke<AppInfo>("app_info"),
@@ -70,7 +74,15 @@ export const api = {
   handleNxm: (url: string) => invoke<string>("handle_nxm", { url }),
   listDownloads: () => invoke<Download[]>("list_downloads"),
   clearFinishedDownloads: () => invoke<Download[]>("clear_finished_downloads"),
-  checkUpdates: (instanceId: string) => invoke<Loadout>("check_updates", { instanceId }),
+  checkUpdates: (instanceId: string, automatic = false) =>
+    invoke<UpdateCheckResult>("check_updates", { instanceId, automatic }),
+  modChangelog: (modId: string, refresh = false) => invoke<ModChangelog>("mod_changelog", { modId, refresh }),
+  setModPinned: (instanceId: string, modId: string, pinned: boolean) =>
+    invoke<Loadout>("set_mod_pinned", { instanceId, modId, pinned }),
+  ignoreUpdate: (instanceId: string, modId: string, ignore: boolean) =>
+    invoke<Loadout>("ignore_update", { instanceId, modId, ignore }),
+  updateAll: (instanceId: string) => invoke<UpdateAllResult>("update_all", { instanceId }),
+  nexusRateLimits: () => invoke<RateLimits | null>("nexus_rate_limits"),
   updateMod: (modId: string) => invoke<string>("update_mod", { modId }),
 
   getFomod: (token: string) => invoke<FomodRequest>("get_fomod", { token }),

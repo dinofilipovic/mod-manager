@@ -22,6 +22,7 @@ import type { GameInstance } from "../bindings/GameInstance";
 import type { Loadout } from "../bindings/Loadout";
 import type { NexusStatus } from "../bindings/NexusStatus";
 import type { ScanResult } from "../bindings/ScanResult";
+import type { UpdateLink } from "../bindings/UpdateLink";
 import { ConfirmDialog, Dialog, PromptDialog } from "../components/Dialog";
 import { Icon } from "../components/Icon";
 import { useToast } from "../components/Toasts";
@@ -38,6 +39,7 @@ type DialogState =
   | { kind: "purge" }
   | { kind: "remove-mod"; modId: string; name: string }
   | { kind: "rename-mod"; modId: string; name: string }
+  | { kind: "update-links"; links: UpdateLink[] }
   | null;
 
 function describeReport(r: DeployReport): string {
@@ -194,15 +196,27 @@ export function GameView({
   };
 
   const checkUpdates = async () => {
-    const next = await run("Checking for updates", () => api.checkUpdates(id));
-    if (next) {
-      setLoadout(next);
-      const count = next.mods.filter((m) => m.mod.update_file_id).length;
-      toast(count ? "info" : "success", count ? `${plural(count, "update")} available` : "All mods are up to date");
+    const result = await run("Checking for updates", () => api.checkUpdates(id));
+    if (result) {
+      setLoadout(result.loadout);
+      const { available, checked, requests } = result.summary;
+      toast(
+        available ? "info" : "success",
+        available ? `${plural(available, "update")} available` : "All mods are up to date",
+        `Looked at ${plural(checked, "mod")} with ${plural(requests, "Nexus request")}.`,
+      );
     }
   };
 
+  const updateAll = async () => {
+    const result = await run("Updating all", () => api.updateAll(id));
+    if (!result) return;
+    if (result.queued) toast("info", `Downloading ${plural(result.queued, "update")}`, "Follow progress in Downloads.");
+    if (result.links.length) setDialog({ kind: "update-links", links: result.links });
+  };
+
   const mods = useMemo(() => loadout?.mods ?? [], [loadout]);
+  const updatable = mods.filter((m) => m.mod.update_file_id && !m.mod.pinned).length;
   const kinds = useMemo(() => [...new Set(mods.flatMap((m) => m.mod.kinds))].sort(), [mods]);
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -488,6 +502,11 @@ export function GameView({
                 <Icon name="refresh" className={busy === "Checking for updates" ? "spin" : undefined} /> Updates
               </button>
             )}
+            {nexus?.user && updatable > 0 && (
+              <button onClick={updateAll} disabled={!!busy}>
+                <Icon name="download" /> Update all ({updatable})
+              </button>
+            )}
             <button className="primary" onClick={async () => install(await pickArchives())} disabled={!!busy}>
               <Icon name="plus" /> Add mods
             </button>
@@ -625,6 +644,17 @@ export function GameView({
             const started = await run("Starting update", () => api.updateMod(selectedMod.mod.id));
             if (started) toast("info", `Updating ${selectedMod.mod.name}`, "Follow progress in Downloads.");
           }}
+          onPin={async (pinned) => {
+            const next = await run(pinned ? "Pinning" : "Unpinning", () => api.setModPinned(id, selectedMod.mod.id, pinned));
+            if (next) setLoadout(next);
+          }}
+          onSkipUpdate={async () => {
+            const next = await run("Skipping update", () => api.ignoreUpdate(id, selectedMod.mod.id, true));
+            if (next) {
+              setLoadout(next);
+              toast("info", "Update skipped", "You'll hear about the next version.");
+            }
+          }}
         />
       )}
 
@@ -716,6 +746,43 @@ export function GameView({
           }}
           onClose={() => setDialog(null)}
         />
+      )}
+      {dialog?.kind === "update-links" && (
+        <Dialog
+          title={`${plural(dialog.links.length, "update")} to download`}
+          onClose={() => setDialog(null)}
+          actions={
+            <>
+              <button onClick={() => setDialog(null)}>Close</button>
+              <button
+                className="primary"
+                onClick={() => {
+                  dialog.links.forEach((l) => void openExternal(l.url));
+                  setDialog(null);
+                }}
+              >
+                <Icon name="external" /> Open all files pages
+              </button>
+            </>
+          }
+        >
+          <p>
+            Free Nexus Mods accounts download through the website. On each files page, click “Mod Manager Download”; the
+            update installs over the old version here.
+          </p>
+          <ul className="missing-mods">
+            {dialog.links.map((l) => (
+              <li key={l.url}>
+                <span>
+                  {l.mod_name} {l.version && <span className="muted small">{l.version}</span>}
+                </span>
+                <button onClick={() => openExternal(l.url)}>
+                  <Icon name="external" /> Files page
+                </button>
+              </li>
+            ))}
+          </ul>
+        </Dialog>
       )}
       {dialog?.kind === "purge" && (
         <ConfirmDialog

@@ -1,0 +1,4 @@
+{
+  "1.27.5": ["Added PDB to GitHub release", "Fixed potential crash when patching .ent resources"],
+  "1.28.0": ["Updated compatibility to game patch 2.5", "Fixed potential crash when patching .ent resources"]
+}

@@ -49,6 +49,8 @@ fn main() {
         .setup(|app| {
             let games = game::builtin_games()?;
             let library = Library::open(&Library::default_root())?;
+            // Background Nexus work respects the budget left from the last run.
+            library.load_rate_limits();
             app.manage(AppState::new(library, games));
 
             #[cfg(any(target_os = "linux", windows))]
@@ -100,6 +102,11 @@ fn main() {
             commands::list_downloads,
             commands::clear_finished_downloads,
             commands::check_updates,
+            commands::mod_changelog,
+            commands::set_mod_pinned,
+            commands::ignore_update,
+            commands::update_all,
+            commands::nexus_rate_limits,
             commands::update_mod,
             commands::get_fomod,
             commands::fomod_state,

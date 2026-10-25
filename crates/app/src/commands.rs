@@ -16,8 +16,9 @@ use mm_core::library::{
     ArchiveOrder, FomodRequest, FomodState, ImportReport, InstallOutcome, Loadout, ModMeta,
     Prepared, ProfileExport,
 };
-use mm_core::nexus::{self, Download, NexusClient, NexusUser};
+use mm_core::nexus::{self, Download, NexusClient, NexusUser, RateLimits};
 use mm_core::saves::{BackupReason, SaveBackup};
+use mm_core::updates::{self, ChangelogVersion, UpdateSummary};
 use mm_core::{GameDefinition, ScanResult};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -573,9 +574,203 @@ pub async fn clear_finished_downloads(app: AppHandle) -> CommandResult<Vec<Downl
     .await
 }
 
-/// Asks Nexus for newer files of every Nexus mod of the install's game.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct UpdateCheckResult {
+    pub loadout: Loadout,
+    pub summary: UpdateSummary,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ModChangelog {
+    /// Newest first.
+    pub versions: Vec<ChangelogVersion>,
+    #[ts(type = "number")]
+    pub fetched_at: i64,
+}
+
+/// A mod whose update needs the "Mod Manager Download" button (free accounts).
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct UpdateLink {
+    pub mod_name: String,
+    pub version: Option<String>,
+    pub url: String,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct UpdateAllResult {
+    /// Downloads queued (Premium).
+    pub queued: u32,
+    /// Files pages to open instead (free accounts).
+    pub links: Vec<UpdateLink>,
+}
+
+/// Asks Nexus which mods of the install's game have newer files, with as
+/// few requests as the last check allows. Nexus is asked without holding the
+/// library, so the app stays usable meanwhile. `automatic` checks pause when
+/// few Nexus requests are left.
 #[tauri::command]
-pub async fn check_updates(app: AppHandle, instance_id: String) -> LoadoutResult {
+pub async fn check_updates(
+    app: AppHandle,
+    instance_id: String,
+    automatic: bool,
+) -> CommandResult<UpdateCheckResult> {
+    blocking(app, move |app, state| {
+        let (_, game, _) = state.resolve(&instance_id)?;
+        let summary = run_update_check(state, game, automatic)?;
+        let _ = app.emit(LIBRARY_CHANGED, ());
+        Ok(UpdateCheckResult {
+            loadout: loadout(state, &instance_id)?,
+            summary,
+        })
+    })
+    .await
+}
+
+pub fn run_update_check(
+    state: &AppState,
+    game: &GameDefinition,
+    automatic: bool,
+) -> CommandResult<UpdateSummary> {
+    let domain = game
+        .stores
+        .nexus_domain
+        .clone()
+        .ok_or("This game isn't on Nexus Mods.")?;
+    let key = nexus::api_key::load()
+        .map_err(err)?
+        .ok_or("Connect your Nexus Mods account in Settings to check for updates.")?;
+    if automatic {
+        nexus::check_budget(mm_core::library::now()).map_err(err)?;
+    }
+    let client = nexus_client(&key)?;
+    // Link mods installed from archives first, so they get checked too: by
+    // the archive's MD5, then by the mod id in its file name.
+    let unlinked = lock(&state.library)
+        .unlinked_archives(&game.id)
+        .map_err(err)?;
+    for (mod_id, md5, archive_name) in unlinked {
+        let found = match client.identify_by_md5(&domain, &md5) {
+            Ok(Some(found)) => Some(found),
+            Ok(None) => archive_name
+                .as_deref()
+                .and_then(|name| client.identify(&domain, name).ok().flatten()),
+            Err(e) => return Err(err(e)),
+        };
+        let library = lock(&state.library);
+        match found {
+            Some(found) => library.apply_nexus_match(&mod_id, &found).map_err(err)?,
+            None => library.mark_lookup_failed(&mod_id).map_err(err)?,
+        }
+    }
+    let Some(check) = lock(&state.library).update_check(game).map_err(err)? else {
+        return Err("This game isn't on Nexus Mods.".into());
+    };
+    let now = mm_core::library::now();
+    let period = updates::period_since(check.last_checked_at, now);
+    let result = updates::run(&client, &check, now);
+    let library = lock(&state.library);
+    let _ = library.save_rate_limits();
+    library
+        .apply_update_check(&result.map_err(err)?, period)
+        .map_err(err)
+}
+
+/// The changelog of a mod's update (or its latest entries), from the cache
+/// unless `refresh` or it's older than a day.
+#[tauri::command]
+pub async fn mod_changelog(
+    app: AppHandle,
+    mod_id: String,
+    refresh: bool,
+) -> CommandResult<ModChangelog> {
+    blocking(app, move |_, state| {
+        let record = lock(&state.library)
+            .store()
+            .get_mod(&mod_id)
+            .map_err(err)?
+            .ok_or("This mod is no longer installed.")?;
+        let game = state.game(&record.game_id)?;
+        let (Some(domain), Some(nexus_mod)) =
+            (game.stores.nexus_domain.clone(), record.nexus_mod_id)
+        else {
+            return Err("This mod isn't linked to Nexus Mods, so it has no changelog here.".into());
+        };
+        let now = mm_core::library::now();
+        let cached = lock(&state.library)
+            .cached_changelog(&domain, nexus_mod)
+            .map_err(err)?
+            .filter(|(at, _)| !refresh && now - at < 86_400);
+        let (fetched_at, entries) = match cached {
+            Some(cached) => cached,
+            None => {
+                let key = nexus::api_key::load()
+                    .map_err(err)?
+                    .ok_or("Connect your Nexus Mods account in Settings to read changelogs.")?;
+                nexus::check_budget(now).map_err(err)?;
+                let entries = nexus_client(&key)?
+                    .changelogs(&domain, nexus_mod)
+                    .map_err(err)?;
+                let library = lock(&state.library);
+                library
+                    .cache_changelog(&domain, nexus_mod, &entries)
+                    .map_err(err)?;
+                let _ = library.save_rate_limits();
+                (now, entries)
+            }
+        };
+        Ok(ModChangelog {
+            versions: updates::relevant_changelog(
+                &entries,
+                record.version.as_deref(),
+                record.update_version.as_deref(),
+            ),
+            fetched_at,
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_mod_pinned(
+    app: AppHandle,
+    instance_id: String,
+    mod_id: String,
+    pinned: bool,
+) -> LoadoutResult {
+    blocking(app, move |_, state| {
+        lock(&state.library)
+            .set_mod_pinned(&mod_id, pinned)
+            .map_err(err)?;
+        loadout(state, &instance_id)
+    })
+    .await
+}
+
+/// Skips a mod's pending update file (`ignore`), or stops skipping it.
+#[tauri::command]
+pub async fn ignore_update(
+    app: AppHandle,
+    instance_id: String,
+    mod_id: String,
+    ignore: bool,
+) -> LoadoutResult {
+    blocking(app, move |_, state| {
+        lock(&state.library)
+            .ignore_update(&mod_id, ignore)
+            .map_err(err)?;
+        loadout(state, &instance_id)
+    })
+    .await
+}
+
+/// Updates every mod with a known update: queued downloads for Premium,
+/// files pages to open for free accounts.
+#[tauri::command]
+pub async fn update_all(app: AppHandle, instance_id: String) -> CommandResult<UpdateAllResult> {
     blocking(app, move |app, state| {
         let (_, game, _) = state.resolve(&instance_id)?;
         let domain = game
@@ -585,44 +780,55 @@ pub async fn check_updates(app: AppHandle, instance_id: String) -> LoadoutResult
             .ok_or("This game isn't on Nexus Mods.")?;
         let key = nexus::api_key::load()
             .map_err(err)?
-            .ok_or("Connect your Nexus Mods account in Settings to check for updates.")?;
-        let client = nexus_client(&key)?;
-        // Link mods installed from archives first, so they get checked too.
-        let unlinked: Vec<_> = lock(&state.library)
+            .ok_or("Connect your Nexus Mods account in Settings first.")?;
+        let premium = nexus_client(&key)?.validate().map_err(err)?.is_premium;
+        let pending: Vec<_> = lock(&state.library)
             .mods_for_game(&game.id)
             .map_err(err)?
             .into_iter()
-            .filter(|m| m.nexus_file_id.is_none())
+            .filter(|m| !m.pinned && m.update_file_id.is_some() && m.nexus_mod_id.is_some())
             .collect();
-        for m in unlinked {
-            if let Some(archive) = &m.archive_name
-                && let Ok(Some(found)) = client.identify(&domain, archive)
-            {
-                lock(&state.library)
-                    .apply_nexus_match(&m.id, &found)
-                    .map_err(err)?;
-            }
-        }
-        let mods = lock(&state.library).mods_for_game(&game.id).map_err(err)?;
-        for m in mods {
-            let (Some(mod_id), Some(file_id)) = (m.nexus_mod_id, m.nexus_file_id) else {
+        let mut result = UpdateAllResult {
+            queued: 0,
+            links: Vec::new(),
+        };
+        for m in pending {
+            let (Some(nexus_mod), Some(file)) = (m.nexus_mod_id, m.update_file_id) else {
                 continue;
             };
-            let files = client.mod_files(&domain, mod_id).map_err(err)?;
-            let newer = files.newer_than(file_id);
-            lock(&state.library)
-                .store()
-                .set_mod_update(
-                    &m.id,
-                    newer.map(|f| f.file_id),
-                    newer.and_then(|f| f.version.as_deref()),
-                )
-                .map_err(err)?;
+            if premium {
+                downloads::start(
+                    app,
+                    Request {
+                        game_domain: domain.clone(),
+                        mod_id: nexus_mod,
+                        file_id: file,
+                        key: None,
+                        expires: None,
+                        replaces: Some(m.id.clone()),
+                    },
+                )?;
+                result.queued += 1;
+            } else {
+                result.links.push(UpdateLink {
+                    mod_name: m.name,
+                    version: m.update_version,
+                    url: format!(
+                        "{}?tab=files&file_id={file}",
+                        nexus::mod_page_url(&domain, nexus_mod)
+                    ),
+                });
+            }
         }
-        let _ = app.emit(LIBRARY_CHANGED, ());
-        loadout(state, &instance_id)
+        Ok(result)
     })
     .await
+}
+
+/// The latest Nexus rate limits seen (also from an earlier run).
+#[tauri::command]
+pub async fn nexus_rate_limits(app: AppHandle) -> CommandResult<Option<RateLimits>> {
+    blocking(app, |_, state| Ok(lock(&state.library).load_rate_limits())).await
 }
 
 /// Downloads a mod's pending update directly. Premium accounts only; free

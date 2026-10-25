@@ -1,0 +1,24 @@
+[
+  {
+    "mod": {
+      "mod_id": 4198,
+      "domain_name": "cyberpunk2077",
+      "name": "ArchiveXL",
+      "summary": "Load custom resources without touching game files.",
+      "version": "1.28.0",
+      "author": "psiberx",
+      "picture_url": "https://staticdelivery.nexusmods.com/mods/3333/images/4198/4198-1.png"
+    },
+    "file_details": {
+      "file_id": 130001,
+      "name": "ArchiveXL",
+      "version": "1.28.0",
+      "category_id": 1,
+      "category_name": "MAIN",
+      "file_name": "ArchiveXL-4198-1-28-0-1761400000.zip",
+      "size_kb": 912,
+      "uploaded_timestamp": 1761400000,
+      "md5": "0f343b0931126a20f133d67c2b018a3b"
+    }
+  }
+]

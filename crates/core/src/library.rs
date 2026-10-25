@@ -38,6 +38,7 @@ use crate::nexus::{NexusMatch, parse_archive_name};
 use crate::requirements::{self, FrameworkState, FrameworkStatus, MissingRequirement, ModFiles};
 use crate::saves;
 use crate::store::{ModFile, ModRecord, ModRevision, Profile, ProfileEntry, Store};
+use crate::updates::{CheckOutcome, UpdateCheck, UpdateSummary};
 
 /// What is known about a mod before installing it.
 #[derive(Debug, Clone, Default)]
@@ -653,6 +654,11 @@ impl Library {
             revision: existing.as_ref().map_or(1, |m| m.revision + 1),
             update_file_id: None,
             update_version: None,
+            // An update keeps the mod's pin and skipped file; the next check
+            // looks at its files again.
+            nexus_updated_at: None,
+            pinned: existing.as_ref().is_some_and(|m| m.pinned),
+            ignored_update_file_id: existing.as_ref().and_then(|m| m.ignored_update_file_id),
         };
         self.store.insert_mod(&record, &files)?;
         self.store.insert_revision(&ModRevision {
@@ -685,6 +691,166 @@ impl Library {
             warnings: plan.warnings,
             replaced_existing: existing.is_some(),
         })
+    }
+
+    // Updates
+
+    /// What an update check of this game needs, copied so the check can run
+    /// without holding the library.
+    pub fn update_check(&self, game: &GameDefinition) -> Result<Option<UpdateCheck>> {
+        let Some(domain) = game.stores.nexus_domain.clone() else {
+            return Ok(None);
+        };
+        Ok(Some(UpdateCheck {
+            game_id: game.id.clone(),
+            game_domain: domain,
+            mods: self.store.mods_for_game(&game.id)?,
+            last_checked_at: self.last_update_check(&game.id),
+        }))
+    }
+
+    /// When the game's mods were last checked for updates.
+    pub fn last_update_check(&self, game_id: &str) -> Option<i64> {
+        self.store
+            .setting(&format!("update_checked:{game_id}"))
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+    }
+
+    /// Records a finished check.
+    pub fn apply_update_check(
+        &self,
+        outcome: &CheckOutcome,
+        period: Option<&str>,
+    ) -> Result<UpdateSummary> {
+        for m in &outcome.mods {
+            self.store.set_mod_checked(
+                &m.mod_id,
+                m.nexus_updated_at,
+                m.update.as_ref().map(|(id, v)| (*id, v.as_deref())),
+            )?;
+        }
+        self.store.set_setting(
+            &format!("update_checked:{}", outcome.game_id),
+            Some(&outcome.checked_at.to_string()),
+        )?;
+        Ok(UpdateSummary {
+            checked: outcome.mods.len() as u32,
+            available: self
+                .store
+                .mods_for_game(&outcome.game_id)?
+                .iter()
+                .filter(|m| m.update_file_id.is_some())
+                .count() as u32,
+            requests: outcome.requests,
+            period: period.map(String::from),
+        })
+    }
+
+    /// Mods without a Nexus link that were installed from a stored archive:
+    /// `(mod id, archive MD5, archive file name)`, for finding them on Nexus.
+    /// Mods looked up in vain during the last week are left out.
+    pub fn unlinked_archives(
+        &self,
+        game_id: &str,
+    ) -> Result<Vec<(String, String, Option<String>)>> {
+        let mut found = Vec::new();
+        for m in self.store.mods_for_game(game_id)? {
+            let tried = self
+                .store
+                .setting(&format!("nexus_lookup_failed:{}", m.id))?
+                .and_then(|v| v.parse::<i64>().ok())
+                .is_some_and(|at| now() - at < 7 * 86_400);
+            if m.nexus_file_id.is_some() || tried {
+                continue;
+            }
+            let archive = self
+                .store
+                .revisions(&m.id)?
+                .into_iter()
+                .find_map(|r| r.archive_id)
+                .map(|id| self.store.archive(id))
+                .transpose()?
+                .flatten();
+            if let Some(a) = archive {
+                found.push((m.id, a.md5, m.archive_name));
+            }
+        }
+        Ok(found)
+    }
+
+    /// Remembers that Nexus didn't know a mod, so it isn't asked again for a week.
+    pub fn mark_lookup_failed(&self, mod_id: &str) -> Result<()> {
+        self.store.set_setting(
+            &format!("nexus_lookup_failed:{mod_id}"),
+            Some(&now().to_string()),
+        )
+    }
+
+    /// Saves the latest Nexus rate limits, so Settings can show them after a restart.
+    pub fn save_rate_limits(&self) -> Result<()> {
+        if let Some(limits) = crate::nexus::rate_limits() {
+            let json = serde_json::to_string(&limits).unwrap_or_default();
+            self.store.set_setting("nexus_rate_limits", Some(&json))?;
+        }
+        Ok(())
+    }
+
+    /// The rate limits seen last, also from an earlier run.
+    pub fn load_rate_limits(&self) -> Option<crate::nexus::RateLimits> {
+        if let Some(limits) = self
+            .store
+            .setting("nexus_rate_limits")
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str(&json).ok())
+        {
+            crate::nexus::remember_rate_limits(limits);
+        }
+        crate::nexus::rate_limits()
+    }
+
+    /// Keeps a mod at its version: update checks skip it.
+    pub fn set_mod_pinned(&self, mod_id: &str, pinned: bool) -> Result<()> {
+        self.store.set_mod_pinned(mod_id, pinned)
+    }
+
+    /// Skips the mod's pending update file; `false` forgets the skip.
+    pub fn ignore_update(&self, mod_id: &str, ignore: bool) -> Result<()> {
+        let record = self
+            .store
+            .get_mod(mod_id)?
+            .ok_or_else(|| Error::NotFound(format!("mod {mod_id}")))?;
+        let file = if ignore {
+            Some(
+                record
+                    .update_file_id
+                    .ok_or_else(|| Error::Install("This mod has no update to skip.".into()))?,
+            )
+        } else {
+            None
+        };
+        self.store.ignore_mod_update(mod_id, file)
+    }
+
+    /// A cached changelog, with when it was fetched.
+    pub fn cached_changelog(
+        &self,
+        game_domain: &str,
+        nexus_mod_id: u32,
+    ) -> Result<Option<(i64, crate::nexus::Changelog)>> {
+        self.store.changelog(game_domain, nexus_mod_id)
+    }
+
+    pub fn cache_changelog(
+        &self,
+        game_domain: &str,
+        nexus_mod_id: u32,
+        entries: &crate::nexus::Changelog,
+    ) -> Result<()> {
+        self.store
+            .set_changelog(game_domain, nexus_mod_id, now(), entries)
     }
 
     // Archive store
@@ -1739,7 +1905,8 @@ fn non_empty(value: &str, what: &str) -> Result<String> {
     }
 }
 
-pub(crate) fn now() -> i64 {
+/// The current time in Unix seconds.
+pub fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)

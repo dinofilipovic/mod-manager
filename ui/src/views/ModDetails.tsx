@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { api, nexusUrls, openExternal } from "../api";
+import { api, errorMessage, nexusUrls, openExternal } from "../api";
 import type { LoadoutMod } from "../bindings/LoadoutMod";
 import type { NexusStatus } from "../bindings/NexusStatus";
+import type { ModChangelog } from "../bindings/ModChangelog";
 import { Icon } from "../components/Icon";
 import { KIND_LABELS, formatBytes, plural, timeAgo } from "../format";
 
@@ -16,6 +17,8 @@ export function ModDetails({
   onRemove,
   onRename,
   onUpdate,
+  onPin,
+  onSkipUpdate,
   onIdentify,
   onEnableMod,
 }: {
@@ -29,6 +32,8 @@ export function ModDetails({
   onRemove: () => void;
   onRename: () => void;
   onUpdate: () => void;
+  onPin: (pinned: boolean) => void;
+  onSkipUpdate: () => void;
   onIdentify: () => Promise<void>;
   onEnableMod: (modId: string) => void;
 }) {
@@ -36,11 +41,24 @@ export function ModDetails({
   const [files, setFiles] = useState<string[] | null>(null);
   const [showFiles, setShowFiles] = useState(false);
   const [identifying, setIdentifying] = useState(false);
+  const [changelog, setChangelog] = useState<
+    { state: "hidden" } | { state: "loading" } | { state: "shown"; log: ModChangelog } | { state: "error"; message: string }
+  >({ state: "hidden" });
 
   useEffect(() => {
     setFiles(null);
     setShowFiles(false);
+    setChangelog({ state: "hidden" });
   }, [m.id, m.revision]);
+
+  const loadChangelog = async (refresh = false) => {
+    setChangelog({ state: "loading" });
+    try {
+      setChangelog({ state: "shown", log: await api.modChangelog(m.id, refresh) });
+    } catch (e) {
+      setChangelog({ state: "error", message: errorMessage(e) });
+    }
+  };
 
   useEffect(() => {
     if (showFiles && !files) void api.modFiles(m.id).then(setFiles);
@@ -119,7 +137,10 @@ export function ModDetails({
 
       {m.update_file_id && gameDomain && m.nexus_mod_id && (
         <div className="callout">
-          <strong>Version {m.update_version ?? "newer"} is available</strong>
+          <strong>
+            Version {m.update_version ?? "newer"} is available
+            {m.version && <span className="muted"> (you have {m.version})</span>}
+          </strong>
           {nexus?.user?.is_premium ? (
             <button className="primary" onClick={onUpdate}>
               <Icon name="download" /> Update now
@@ -132,6 +153,43 @@ export function ModDetails({
               </button>
             </>
           )}
+          <div className="row">
+            <button
+              className="link-button"
+              onClick={() => (changelog.state === "shown" ? setChangelog({ state: "hidden" }) : loadChangelog())}
+              disabled={changelog.state === "loading"}
+            >
+              {changelog.state === "loading" ? "Loading changelog…" : changelog.state === "shown" ? "Hide changes" : "What's new?"}
+            </button>
+            <button className="link-button" onClick={onSkipUpdate} title="Don't offer this version again">
+              Skip this version
+            </button>
+          </div>
+          {changelog.state === "error" && (
+            <p className="error-text" role="alert">
+              {changelog.message}
+            </p>
+          )}
+          {changelog.state === "shown" &&
+            (changelog.log.versions.length ? (
+              <div className="changelog">
+                {changelog.log.versions.map((v) => (
+                  <div key={v.version}>
+                    <strong>{v.version}</strong>
+                    <ul>
+                      {v.lines.map((line, i) => (
+                        <li key={i}>{line}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+                <button className="link-button small" onClick={() => loadChangelog(true)}>
+                  Refresh · fetched {timeAgo(changelog.log.fetched_at)}
+                </button>
+              </div>
+            ) : (
+              <p className="muted small">The author didn't write a changelog for this version.</p>
+            ))}
         </div>
       )}
 
@@ -173,6 +231,17 @@ export function ModDetails({
         </dd>
         <dt>Installed</dt>
         <dd>{timeAgo(m.installed_at)}</dd>
+        {m.nexus_mod_id && (
+          <>
+            <dt>Updates</dt>
+            <dd>
+              <label className="toggle-inline">
+                <input type="checkbox" checked={m.pinned} onChange={(e) => onPin(e.target.checked)} />
+                Keep this version (pin)
+              </label>
+            </dd>
+          </>
+        )}
         {m.archive_name && (
           <>
             <dt>Archive</dt>

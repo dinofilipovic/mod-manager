@@ -16,4 +16,16 @@ revision: number,
 /**
  * Newer Nexus file, set by the update check.
  */
-update_file_id: number | null, update_version: string | null, };
+update_file_id: number | null, update_version: string | null, 
+/**
+ * The newest file upload seen on Nexus at the last check, Unix seconds.
+ */
+nexus_updated_at: number | null, 
+/**
+ * Kept at this version: update checks skip it.
+ */
+pinned: boolean, 
+/**
+ * A newer file the user chose not to install.
+ */
+ignored_update_file_id: number | null, };

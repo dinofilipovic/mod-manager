@@ -4,6 +4,7 @@ import type { AppInfo } from "../bindings/AppInfo";
 import type { ArchiveRetention } from "../bindings/ArchiveRetention";
 import type { ArchivesInfo } from "../bindings/ArchivesInfo";
 import type { NexusStatus } from "../bindings/NexusStatus";
+import type { RateLimits } from "../bindings/RateLimits";
 import { Icon } from "../components/Icon";
 import { useToast } from "../components/Toasts";
 import { formatBytes } from "../format";
@@ -31,6 +32,7 @@ export function SettingsView({
   const [justConnected, setJustConnected] = useState(false);
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [archives, setArchives] = useState<ArchivesInfo | null>(null);
+  const [limits, setLimits] = useState<RateLimits | null>(null);
   const [archiveBusy, setArchiveBusy] = useState<string | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [, tick] = useState(0);
@@ -38,6 +40,7 @@ export function SettingsView({
   useEffect(() => {
     void api.appInfo().then(setInfo);
     api.archivesInfo().then(setArchives, (e) => setArchiveError(errorMessage(e)));
+    api.nexusRateLimits().then(setLimits, () => setLimits(null));
   }, []);
 
   const archiveAction = async (label: string, work: () => Promise<void>) => {
@@ -128,6 +131,7 @@ export function SettingsView({
                 </div>
               </div>
             )}
+            {limits && <RateLimitsLine limits={limits} />}
             <div className="account-row">
               <span className="avatar connected large">{nexus.user.name.slice(0, 1).toUpperCase()}</span>
               <div>
@@ -357,6 +361,32 @@ export function SettingsView({
           <dd>{info ? (info.crossover_installed ? "Found" : "Not found in Applications") : "…"}</dd>
         </dl>
       </section>
+    </div>
+  );
+}
+
+/** How many Nexus Mods requests are left, and what happens when few are. */
+function RateLimitsLine({ limits }: { limits: RateLimits }) {
+  const daily = limits.daily_remaining > 0;
+  const left = daily ? limits.daily_remaining : limits.hourly_remaining;
+  const reset = daily ? limits.daily_reset : limits.hourly_reset;
+  const low = left <= 20;
+  return (
+    <div className={`notice ${low ? "notice-warn" : "notice-info"}`}>
+      <Icon name={low ? "alert" : "check"} />
+      <div>
+        <strong>
+          {daily
+            ? `${left} of ${limits.daily_limit} Nexus Mods requests left today`
+            : `${left} of ${limits.hourly_limit} requests left this hour (today's ${limits.daily_limit} are used up)`}
+        </strong>
+        <p>
+          {reset ? `More from ${new Date(reset * 1000).toLocaleString()}. ` : ""}
+          {low
+            ? "Automatic update checks and changelogs wait until then, so downloads keep working."
+            : `Seen ${new Date(limits.observed_at * 1000).toLocaleTimeString()}.`}
+        </p>
+      </div>
     </div>
   );
 }

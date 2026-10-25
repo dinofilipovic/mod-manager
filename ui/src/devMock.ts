@@ -123,6 +123,9 @@ function mod(id: string, name: string, kinds: string[], extra: Partial<ModRecord
     revision: 1,
     update_file_id: null,
     update_version: null,
+    nexus_updated_at: null,
+    pinned: false,
+    ignored_update_file_id: null,
     ...extra,
   };
 }
@@ -241,6 +244,45 @@ export function installDevMock() {
               { target: "bin/x64/plugins/cyber_engine_tweaks/mods/ImmersiveHUD/settings.json", mod_id: "m2", mod_name: "Immersive HUD", kind: "Modified" },
               { target: "engine/config/platform/pc/user.ini", mod_id: "m4", mod_name: "Better Vehicle Handling", kind: "ReplacedByGame" },
             ],
+          };
+        case "check_updates":
+          return { loadout: loadout(), summary: { checked: 3, available: 1, requests: 4, period: "1w" } };
+        case "mod_changelog":
+          return {
+            versions: [
+              { version: "1.38.0", lines: ["Supports Cyberpunk 2077 patch 2.5.", "ImGui docking for CET and mod windows."] },
+              { version: "1.37.1", lines: ["Fixed NewProxy crashes."] },
+            ],
+            fetched_at: now - 120,
+          };
+        case "set_mod_pinned":
+          mods = mods.map((m) => (m.mod.id === a.modId ? { ...m, mod: { ...m.mod, pinned: a.pinned as boolean } } : m));
+          return loadout();
+        case "ignore_update":
+          mods = mods.map((m) =>
+            m.mod.id === a.modId ? { ...m, mod: { ...m.mod, update_file_id: null, update_version: null } } : m,
+          );
+          return loadout();
+        case "update_all":
+          return {
+            queued: 0,
+            links: [
+              {
+                mod_name: "Cyber Engine Tweaks",
+                version: "1.38.0",
+                url: "https://www.nexusmods.com/cyberpunk2077/mods/107?tab=files&file_id=130002",
+              },
+            ],
+          };
+        case "nexus_rate_limits":
+          return {
+            hourly_limit: 100,
+            hourly_remaining: 100,
+            hourly_reset: now + 1800,
+            daily_limit: 2500,
+            daily_remaining: 2431,
+            daily_reset: now + 40_000,
+            observed_at: now - 60,
           };
         case "archives_info":
           return archivesInfo();

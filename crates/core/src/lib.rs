@@ -20,6 +20,7 @@ mod registry;
 pub mod requirements;
 pub mod saves;
 pub mod store;
+pub mod updates;
 mod vdf;
 
 use serde::Serialize;

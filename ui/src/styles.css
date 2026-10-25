@@ -2067,3 +2067,31 @@ input.grow {
 .drift-list code {
   word-break: break-all;
 }
+
+.error-text {
+  color: var(--danger);
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+
+.toggle-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.changelog {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  font-size: 12px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.changelog ul {
+  margin: 2px 0 8px;
+  padding-left: 16px;
+}

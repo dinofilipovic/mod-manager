@@ -120,6 +120,7 @@ export function ModList({
                   </span>
                 )}
                 {m.update_file_id && <span className="badge badge-update">Update {m.update_version ?? ""}</span>}
+                {m.pinned && <span className="badge">Pinned</span>}
                 {entry.enabled && entry.overridden_by.length > 0 && (
                   <span className="badge badge-lose" title={`Overridden by ${entry.overridden_by.join(", ")}`}>
                     <Icon name="bolt" size={11} /> loses {entry.conflict_files}

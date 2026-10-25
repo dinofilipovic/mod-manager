@@ -8,6 +8,7 @@ use ts_rs::TS;
 
 use crate::archives::{ArchiveRecord, ArchiveSource};
 use crate::error::Result;
+use crate::nexus::Changelog;
 
 pub const SCHEMA_VERSION: i32 = 3;
 
@@ -101,8 +102,21 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (2, MIGRATION_3),
 ];
 
-/// Version 3: deployment journal, file hashes, the archive store and mod revisions.
+/// Version 3: deployment journal, file hashes, the archive store, mod
+/// revisions, update tracking and the download queue.
 const MIGRATION_3: &str = "
+ALTER TABLE mods ADD COLUMN nexus_updated_at INTEGER;
+ALTER TABLE mods ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE mods ADD COLUMN ignored_update_file_id INTEGER;
+
+CREATE TABLE changelogs (
+    game_domain TEXT NOT NULL,
+    nexus_mod_id INTEGER NOT NULL,
+    fetched_at INTEGER NOT NULL,
+    entries TEXT NOT NULL,
+    PRIMARY KEY (game_domain, nexus_mod_id)
+);
+
 ALTER TABLE mod_files ADD COLUMN size INTEGER;
 ALTER TABLE mod_files ADD COLUMN sha256 TEXT;
 
@@ -179,6 +193,13 @@ pub struct ModRecord {
     /// Newer Nexus file, set by the update check.
     pub update_file_id: Option<u32>,
     pub update_version: Option<String>,
+    /// The newest file upload seen on Nexus at the last check, Unix seconds.
+    #[ts(type = "number | null")]
+    pub nexus_updated_at: Option<i64>,
+    /// Kept at this version: update checks skip it.
+    pub pinned: bool,
+    /// A newer file the user chose not to install.
+    pub ignored_update_file_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -363,12 +384,12 @@ impl Store {
         tx.execute(
             "INSERT INTO mods (id, game_id, name, version, author, summary, picture_url, nexus_mod_id,
                 nexus_file_id, archive_name, kinds, file_count, size_bytes, installed_at, revision,
-                update_file_id, update_version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                update_file_id, update_version, nexus_updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
              ON CONFLICT(id) DO UPDATE SET name = ?3, version = ?4, author = ?5, summary = ?6,
                 picture_url = ?7, nexus_mod_id = ?8, nexus_file_id = ?9, archive_name = ?10, kinds = ?11,
                 file_count = ?12, size_bytes = ?13, installed_at = ?14, revision = ?15,
-                update_file_id = ?16, update_version = ?17",
+                update_file_id = ?16, update_version = ?17, nexus_updated_at = ?18",
             params![
                 record.id,
                 record.game_id,
@@ -387,6 +408,7 @@ impl Store {
                 record.revision,
                 record.update_file_id,
                 record.update_version,
+                record.nexus_updated_at,
             ],
         )?;
         tx.execute("DELETE FROM mod_files WHERE mod_id = ?1", [&record.id])?;
@@ -490,6 +512,87 @@ impl Store {
                 picture_url,
                 nexus_mod_id,
                 nexus_file_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Records what an update check found for a mod.
+    pub fn set_mod_checked(
+        &self,
+        id: &str,
+        nexus_updated_at: Option<i64>,
+        update: Option<(u32, Option<&str>)>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE mods SET nexus_updated_at = COALESCE(?2, nexus_updated_at),
+                update_file_id = ?3, update_version = ?4 WHERE id = ?1",
+            params![
+                id,
+                nexus_updated_at,
+                update.map(|u| u.0),
+                update.and_then(|u| u.1)
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_mod_pinned(&self, id: &str, pinned: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE mods SET pinned = ?2,
+                update_file_id = CASE WHEN ?2 THEN NULL ELSE update_file_id END,
+                update_version = CASE WHEN ?2 THEN NULL ELSE update_version END
+             WHERE id = ?1",
+            params![id, pinned],
+        )?;
+        Ok(())
+    }
+
+    /// Skips the pending update file (and the update), or forgets a skip.
+    pub fn ignore_mod_update(&self, id: &str, file_id: Option<u32>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE mods SET ignored_update_file_id = ?2,
+                update_file_id = CASE WHEN update_file_id = ?2 THEN NULL ELSE update_file_id END,
+                update_version = CASE WHEN update_file_id = ?2 THEN NULL ELSE update_version END
+             WHERE id = ?1",
+            params![id, file_id],
+        )?;
+        Ok(())
+    }
+
+    // Changelogs
+
+    pub fn changelog(
+        &self,
+        game_domain: &str,
+        nexus_mod_id: u32,
+    ) -> Result<Option<(i64, Changelog)>> {
+        let row: Option<(i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT fetched_at, entries FROM changelogs WHERE game_domain = ?1 AND nexus_mod_id = ?2",
+                params![game_domain, nexus_mod_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(at, json)| (at, serde_json::from_str(&json).unwrap_or_default())))
+    }
+
+    pub fn set_changelog(
+        &self,
+        game_domain: &str,
+        nexus_mod_id: u32,
+        fetched_at: i64,
+        entries: &Changelog,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO changelogs (game_domain, nexus_mod_id, fetched_at, entries) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(game_domain, nexus_mod_id) DO UPDATE SET fetched_at = ?3, entries = ?4",
+            params![
+                game_domain,
+                nexus_mod_id,
+                fetched_at,
+                serde_json::to_string(entries).unwrap_or_else(|_| "{}".into())
             ],
         )?;
         Ok(())
@@ -1033,6 +1136,9 @@ fn row_to_mod(r: &rusqlite::Row) -> rusqlite::Result<ModRecord> {
         revision: r.get("revision")?,
         update_file_id: r.get("update_file_id")?,
         update_version: r.get("update_version")?,
+        nexus_updated_at: r.get("nexus_updated_at")?,
+        pinned: r.get("pinned")?,
+        ignored_update_file_id: r.get("ignored_update_file_id")?,
     })
 }
 

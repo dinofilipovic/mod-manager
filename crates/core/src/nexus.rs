@@ -4,6 +4,7 @@
 //! Download" button, which opens an `nxm://` link carrying a short-lived key.
 //! Premium accounts can also request download links directly (used for updates).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -15,6 +16,11 @@ use ts_rs::TS;
 use crate::error::{Error, Result};
 
 const API: &str = "https://api.nexusmods.com/v1";
+/// Overrides the API address (a test server).
+const API_ENV: &str = "MM_NEXUS_API_URL";
+/// Requests kept back for downloads and the user's own actions: background
+/// work (update checks, changelogs, requirement lookups) pauses below this.
+const RESERVED_REQUESTS: u32 = 20;
 const APP_NAME: &str = "ModManager";
 const KEYRING_SERVICE: &str = "dev.local.modmanager";
 const KEYRING_USER: &str = "nexus-api-key";
@@ -79,6 +85,9 @@ pub struct NexusModInfo {
     pub version: Option<String>,
     pub author: Option<String>,
     pub picture_url: Option<String>,
+    /// The game's Nexus domain (in MD5 search results, which span games).
+    #[serde(default)]
+    pub domain_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -91,6 +100,155 @@ pub struct NexusFile {
     pub category_name: Option<String>,
     #[ts(type = "number | null")]
     pub size_kb: Option<u64>,
+    /// Unix seconds.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub uploaded_timestamp: Option<i64>,
+}
+
+/// A mod updated within the period asked for (`updated.json`).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct UpdateEntry {
+    pub mod_id: u32,
+    /// Unix seconds of the newest file upload.
+    pub latest_file_update: i64,
+    pub latest_mod_activity: i64,
+}
+
+/// A mod's changelog: version -> lines.
+pub type Changelog = BTreeMap<String, Vec<String>>;
+
+/// A file found by its MD5 hash.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Md5Match {
+    #[serde(rename = "mod")]
+    pub mod_info: NexusModInfo,
+    pub file_details: NexusFile,
+}
+
+/// The `X-RL-*` headers of the latest Nexus response: 2,500 requests a day,
+/// then 100 an hour once the daily ones are used up.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RateLimits {
+    pub hourly_limit: u32,
+    pub hourly_remaining: u32,
+    /// Unix seconds.
+    #[ts(type = "number | null")]
+    pub hourly_reset: Option<i64>,
+    pub daily_limit: u32,
+    pub daily_remaining: u32,
+    #[ts(type = "number | null")]
+    pub daily_reset: Option<i64>,
+    /// When these were read, Unix seconds.
+    #[ts(type = "number")]
+    pub observed_at: i64,
+}
+
+impl RateLimits {
+    fn from_headers(headers: &reqwest::header::HeaderMap, now: i64) -> Option<Self> {
+        let text = |name: &str| headers.get(name)?.to_str().ok().map(str::trim);
+        let number = |name: &str| text(name)?.parse().ok();
+        Some(Self {
+            hourly_limit: number("x-rl-hourly-limit")?,
+            hourly_remaining: number("x-rl-hourly-remaining")?,
+            hourly_reset: text("x-rl-hourly-reset").and_then(parse_reset_time),
+            daily_limit: number("x-rl-daily-limit")?,
+            daily_remaining: number("x-rl-daily-remaining")?,
+            daily_reset: text("x-rl-daily-reset").and_then(parse_reset_time),
+            observed_at: now,
+        })
+    }
+
+    /// Requests that can still be made now: the daily ones, then the hourly ones.
+    pub fn available(&self) -> u32 {
+        if self.daily_remaining > 0 {
+            self.daily_remaining
+        } else {
+            self.hourly_remaining
+        }
+    }
+
+    /// When more requests become available again, if known.
+    pub fn next_reset(&self) -> Option<i64> {
+        if self.daily_remaining > 0 {
+            self.daily_reset
+        } else {
+            self.hourly_reset
+        }
+    }
+}
+
+/// Reads the reset times Nexus sends: `2019-02-01T12:00:00+00:00` (hourly)
+/// and `2019-02-02 00:00:00 +0000` (daily). Returns Unix seconds.
+pub fn parse_reset_time(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let (date, rest) = text.split_at_checked(10)?;
+    let rest = rest.trim_start_matches(['T', ' ']);
+    let (time, offset) = rest.split_at_checked(8)?;
+    let mut d = date.split('-').map(|p| p.parse::<i64>());
+    let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
+    let mut t = time.split(':').map(|p| p.parse::<i64>());
+    let (hh, mm, ss) = (t.next()?.ok()?, t.next()?.ok()?, t.next()?.ok()?);
+    let offset = offset.trim().replace(':', "");
+    let offset_secs = if offset.is_empty() || offset == "Z" {
+        0
+    } else {
+        let sign = if offset.starts_with('-') { -1 } else { 1 };
+        let digits = offset.trim_start_matches(['+', '-']);
+        let (oh, om) = digits.split_at_checked(2)?;
+        sign * (oh.parse::<i64>().ok()? * 3600 + om.parse::<i64>().ok()? * 60)
+    };
+    // Days since the epoch for a proleptic Gregorian date.
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hh * 3600 + mm * 60 + ss - offset_secs)
+}
+
+/// The latest rate-limit headers seen this run.
+static RATE_LIMITS: std::sync::Mutex<Option<RateLimits>> = std::sync::Mutex::new(None);
+
+pub fn rate_limits() -> Option<RateLimits> {
+    RATE_LIMITS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+/// Seeds the snapshot from an earlier run, unless this run has its own.
+pub fn remember_rate_limits(limits: RateLimits) {
+    let mut current = RATE_LIMITS.lock().unwrap_or_else(|p| p.into_inner());
+    if current.is_none() {
+        *current = Some(limits);
+    }
+}
+
+/// Fails when background work should wait so the remaining requests are
+/// kept for downloads and the user's own actions.
+pub fn check_budget(now: i64) -> Result<()> {
+    let Some(limits) = rate_limits() else {
+        return Ok(());
+    };
+    // A reset since the snapshot means the budget is back.
+    if limits.next_reset().is_some_and(|reset| reset <= now) {
+        return Ok(());
+    }
+    let available = limits.available();
+    if available > RESERVED_REQUESTS {
+        return Ok(());
+    }
+    let when = limits
+        .next_reset()
+        .map(|r| format!(" in about {} minutes", ((r - now).max(60) + 59) / 60))
+        .unwrap_or_default();
+    Err(Error::Nexus(format!(
+        "Paused to save your Nexus Mods requests: only {available} are left until they reset{when}. \
+         Downloads still work; check for updates again after the reset."
+    )))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -172,10 +330,17 @@ struct DownloadLink {
 pub struct NexusClient {
     http: reqwest::blocking::Client,
     api_key: String,
+    base: String,
 }
 
 impl NexusClient {
     pub fn new(api_key: &str, app_version: &str) -> Result<Self> {
+        let base = std::env::var(API_ENV).unwrap_or_else(|_| API.to_string());
+        Self::with_base_url(api_key, app_version, &base)
+    }
+
+    /// A client for another server with the same API (tests).
+    pub fn with_base_url(api_key: &str, app_version: &str, base: &str) -> Result<Self> {
         let http = reqwest::blocking::Client::builder()
             .user_agent(format!("{APP_NAME}/{app_version}"))
             .connect_timeout(Duration::from_secs(15))
@@ -185,13 +350,14 @@ impl NexusClient {
         Ok(Self {
             http,
             api_key: api_key.trim().to_string(),
+            base: base.trim_end_matches('/').to_string(),
         })
     }
 
     fn get<T: for<'de> Deserialize<'de>>(&self, path: &str, query: &[(&str, String)]) -> Result<T> {
         let response = self
             .http
-            .get(format!("{API}{path}"))
+            .get(format!("{}{path}", self.base))
             .header("apikey", &self.api_key)
             .header("Application-Name", APP_NAME)
             .header("Application-Version", env!("CARGO_PKG_VERSION"))
@@ -205,6 +371,9 @@ impl NexusClient {
                     format!("Couldn't reach Nexus Mods. Check your internet connection. ({e})")
                 })
             })?;
+        if let Some(limits) = RateLimits::from_headers(response.headers(), crate::library::now()) {
+            *RATE_LIMITS.lock().unwrap_or_else(|p| p.into_inner()) = Some(limits);
+        }
         let status = response.status();
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
@@ -216,7 +385,7 @@ impl NexusClient {
                 401 => "Nexus Mods didn't accept this API key. Copy the whole Personal API Key from your Nexus account page and try again.".into(),
                 403 => format!("Nexus Mods refused the request: {message}"),
                 404 => "Not found on Nexus Mods.".into(),
-                429 => "Nexus Mods rate limit reached; try again later.".into(),
+                429 => "Nexus Mods rate limit reached: you've used this hour's requests. Try again after the hour; Settings shows when they reset.".into(),
                 code => format!("Nexus Mods error {code}: {message}"),
             }));
         }
@@ -242,6 +411,28 @@ impl NexusClient {
 
     pub fn mod_files(&self, game: &str, mod_id: u32) -> Result<NexusFileList> {
         self.get(&format!("/games/{game}/mods/{mod_id}/files.json"), &[])
+    }
+
+    /// Mods of a game with new files or changes in the last `period`
+    /// (`1d`, `1w` or `1m`).
+    pub fn updated_mods(&self, game: &str, period: &str) -> Result<Vec<UpdateEntry>> {
+        self.get(
+            &format!("/games/{game}/mods/updated.json"),
+            &[("period", period.to_string())],
+        )
+    }
+
+    /// Files with this MD5 hash; empty when Nexus doesn't know it.
+    pub fn md5_search(&self, game: &str, md5: &str) -> Result<Vec<Md5Match>> {
+        match self.get(&format!("/games/{game}/mods/md5_search/{md5}.json"), &[]) {
+            Err(Error::Nexus(m)) if m == "Not found on Nexus Mods." => Ok(Vec::new()),
+            other => other,
+        }
+    }
+
+    /// A mod's changelog: version -> lines.
+    pub fn changelogs(&self, game: &str, mod_id: u32) -> Result<Changelog> {
+        self.get(&format!("/games/{game}/mods/{mod_id}/changelogs.json"), &[])
     }
 
     /// A download URL. Free accounts need the key and expiry from an nxm link.
@@ -539,6 +730,33 @@ impl NexusClient {
             author: info.author,
             summary: info.summary,
             picture_url: info.picture_url,
+        }))
+    }
+}
+
+impl NexusClient {
+    /// Finds the file an archive was downloaded as by its MD5 hash, among
+    /// the files of `game_domain`.
+    pub fn identify_by_md5(&self, game_domain: &str, md5: &str) -> Result<Option<NexusMatch>> {
+        let found = self.md5_search(game_domain, md5)?;
+        let Some(hit) = found.into_iter().find(|m| {
+            m.mod_info
+                .domain_name
+                .as_deref()
+                .is_none_or(|d| d.eq_ignore_ascii_case(game_domain))
+        }) else {
+            return Ok(None);
+        };
+        let file = hit.file_details;
+        Ok(Some(NexusMatch {
+            mod_id: hit.mod_info.mod_id,
+            file_id: Some(file.file_id),
+            name: display_name(&hit.mod_info, Some(&file))
+                .unwrap_or_else(|| format!("Mod {}", hit.mod_info.mod_id)),
+            version: file.version.clone().or(hit.mod_info.version.clone()),
+            author: hit.mod_info.author,
+            summary: hit.mod_info.summary,
+            picture_url: hit.mod_info.picture_url,
         }))
     }
 }
