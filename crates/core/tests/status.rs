@@ -131,6 +131,23 @@ fn logs_tell_which_mods_loaded() {
     assert_eq!(status(&unseen), LoadStatus::NotSeen);
     assert_eq!(status(&textures), LoadStatus::CantVerify);
 
+    // A log cut short (the game crashed loading a plugin): the plugins it
+    // got through still count as loaded.
+    let full = String::from_utf8(fixture_log("red4ext-2026-10-25-14-03-11.log")).unwrap();
+    let cut: String = full.lines().take(7).map(|l| format!("{l}\n")).collect();
+    fixtures::write_files(
+        root,
+        &[(
+            "red4ext/logs/red4ext-2026-10-25-14-03-11.log",
+            cut.as_bytes(),
+        )],
+    );
+    let statuses = lib.refresh_mod_status(&game, &instance).unwrap();
+    assert_eq!(statuses[&axl].status, LoadStatus::Loaded);
+    assert_eq!(statuses[&mod_settings].status, LoadStatus::Loaded);
+    assert_eq!(statuses[&broken_plugin].status, LoadStatus::Errors);
+    assert_eq!(statuses[&old_plugin].status, LoadStatus::NotSeen);
+
     // The mod list shows them.
     let loadout = lib.loadout(&game, &instance).unwrap();
     let shown = loadout.mods.iter().find(|m| m.record.id == cool).unwrap();

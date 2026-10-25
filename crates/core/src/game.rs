@@ -231,8 +231,9 @@ pub struct LayoutCheck {
     /// File extensions it looks at; `lua_entry` checks mod folders and needs none.
     #[serde(default)]
     pub extensions: Vec<String>,
-    /// File names it looks at, whatever their extension. A file only gets
-    /// the first check of each checker that names it.
+    /// File names it looks at directly inside a mod's folder
+    /// (`<path>/<mod>/<name>`), whatever their extension. A file only gets
+    /// the first check of each checker that matches it.
     #[serde(default)]
     pub files: Vec<String>,
     /// A problem found here doesn't keep the mod from loading (say, a

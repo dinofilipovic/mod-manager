@@ -37,12 +37,14 @@ pub fn unowned_groups(
         .load_order
         .as_ref()
         .map(|o| o.file.to_ascii_lowercase());
-    // Folders a managed mod placed files in. Frameworks write logs and
-    // settings into their mods' folders (CET's `mods/<name>/<name>.log`);
-    // those belong to the mod, not to a hand-installed one.
+    // Folders a managed mod placed files directly in. Frameworks write logs
+    // and settings into their mods' folders (CET's `mods/<name>/<name>.log`);
+    // those belong to the mod, not to a hand-installed one. Only direct
+    // files count: a managed add-on deeper in a hand-installed mod's folder
+    // (`mods/AppearanceMenuMod/Collabs/...`) doesn't make that mod ours.
     let owned_dirs: HashSet<&str> = owned
         .iter()
-        .flat_map(|path| path.match_indices('/').map(move |(i, _)| &path[..i]))
+        .filter_map(|path| path.rsplit_once('/').map(|(dir, _)| dir))
         .collect();
     let mut groups: BTreeMap<(String, String), UnownedGroup> = BTreeMap::new();
     for layout in game

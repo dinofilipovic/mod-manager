@@ -69,10 +69,17 @@ pub fn check_mod(
                 .extension()
                 .map(|e| e.to_string_lossy().to_ascii_lowercase())
                 .unwrap_or_default();
-            let file_name = target.rsplit('/').next().unwrap_or(target);
+            // `files` names are directly inside a mod's folder in the layout.
+            let in_mod_folder = target[layout.path.len()..]
+                .trim_start_matches('/')
+                .split_once('/')
+                .map(|(_, name)| name)
+                .filter(|name| !name.contains('/'));
             let mut ran = BTreeSet::new();
             for check in layout.checks.iter().filter(|c| {
-                c.files.iter().any(|f| f.eq_ignore_ascii_case(file_name))
+                c.files
+                    .iter()
+                    .any(|f| in_mod_folder.is_some_and(|n| n.eq_ignore_ascii_case(f)))
                     || c.extensions.iter().any(|e| e.eq_ignore_ascii_case(&ext))
             }) {
                 if !ran.insert(check.checker.as_str()) {
@@ -120,8 +127,9 @@ pub fn check_mod(
             continue;
         }
         let prefix = format!("{}/", layout.path.to_ascii_lowercase());
-        // Per folder: init.lua directly inside, init.lua deeper down.
-        let mut folders: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+        // Per folder: init.lua directly inside, and the subfolders below it
+        // (with whether each has init.lua directly inside).
+        let mut folders: BTreeMap<String, (bool, BTreeMap<String, bool>)> = BTreeMap::new();
         for target in files {
             // Only files whose most specific layout is this one.
             if game.layout_for(target).map(|l| &l.path) != Some(&layout.path) {
@@ -144,17 +152,25 @@ pub fn check_mod(
                 .next()
                 .unwrap_or_default()
                 .to_string();
-            let is_entry = parts.last() == Some(&"init.lua");
             let found = folders.entry(folder).or_default();
-            found.0 |= is_entry && parts.len() == 2;
-            found.1 |= is_entry && parts.len() > 2;
+            match parts.len() {
+                2 => found.0 |= parts[1] == "init.lua",
+                _ => {
+                    *found.1.entry(parts[1].to_string()).or_default() |=
+                        parts.len() == 3 && parts[2] == "init.lua"
+                }
+            }
         }
-        for (folder, (direct, deeper)) in folders {
+        for (folder, (direct, subfolders)) in folders {
             let target = format!("{}/{folder}", layout.path);
             if direct {
                 continue;
             }
-            results.push(if deeper {
+            // Packed one folder too deep: the whole folder is one subfolder
+            // that is a mod by itself. An add-on with a Lua package next to
+            // other files is not.
+            let wrapped = subfolders.len() == 1 && subfolders.values().all(|&entry| entry);
+            results.push(if wrapped {
                 error(
                     "lua_entry",
                     &target,
@@ -278,12 +294,16 @@ fn run_file_check(checker: &str, path: &Path) -> Result<(), FileProblem> {
                 .take(0x40)
                 .read_to_end(&mut head)
                 .map_err(unreadable)?;
-            // The PE header can start anywhere the DOS header points.
-            if head.len() == 0x40 {
-                let pe = u32::from_le_bytes(head[0x3C..0x40].try_into().unwrap()) as u64;
-                if pe >= 0x40 && file.seek(SeekFrom::Start(pe)).is_ok() {
-                    head.resize(pe as usize, 0);
+            // The PE header can start anywhere the DOS header points: read
+            // its 24 bytes from there and put them right after the DOS
+            // header, so only 88 bytes are ever held.
+            let len = file.metadata().map_err(unreadable)?.len();
+            if head.len() == 0x40 && &head[..2] == b"MZ" {
+                let pe = u64::from(u32::from_le_bytes(head[0x3C..0x40].try_into().unwrap()));
+                if pe >= 0x40 && pe + 24 <= len {
+                    file.seek(SeekFrom::Start(pe)).map_err(unreadable)?;
                     file.take(24).read_to_end(&mut head).map_err(unreadable)?;
+                    head[0x3C..0x40].copy_from_slice(&0x40u32.to_le_bytes());
                 }
             }
             Ok(check_pe64_dll(&head)?)
@@ -492,6 +512,13 @@ mod tests {
                     b"return {}",
                 ),
                 ("bin/x64/plugins/cyber_engine_tweaks/mods/readme.txt", b"hi"),
+                // An add-on shipping a Lua package.
+                (
+                    "bin/x64/plugins/cyber_engine_tweaks/mods/Host/addon/lib/init.lua",
+                    b"return {}",
+                ),
+                // The game only reads info.json directly in the mod's folder.
+                ("mods/Redmod/extra/info.json", b"{"),
                 (
                     "r6/tweaks/Dup/dup.yaml",
                     b"Items.A:\n  price: 1\n  price: 2\n",
@@ -502,16 +529,29 @@ mod tests {
             ],
         );
         let results = check_mod(&game, dir.path(), &files, 60);
+        let mut found = checks(&results);
+        found.sort_by_key(|(c, _)| *c);
         assert_eq!(
-            checks(&results),
+            found,
             [
-                ("yaml", CheckSeverity::Warning),
+                ("json", CheckSeverity::Warning),
                 ("json", CheckSeverity::Warning),
                 ("lua_entry", CheckSeverity::Warning),
+                ("lua_entry", CheckSeverity::Warning),
+                ("yaml", CheckSeverity::Warning),
             ],
             "{results:#?}"
         );
         assert!(!wont_load(&results));
+
+        // A PE offset pointing far past the end is just not a DLL (and
+        // nothing that large is read or allocated).
+        let mut bogus = vec![0u8; 0x40];
+        bogus[..2].copy_from_slice(b"MZ");
+        bogus[0x3C..0x40].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+        let files = write(dir.path(), &[("red4ext/plugins/Bogus/Bogus.dll", &bogus)]);
+        let results = check_mod(&game, dir.path(), &files, 60);
+        assert_eq!(checks(&results), [("pe64_dll", CheckSeverity::Error)]);
 
         // But a REDmod's info.json must parse.
         let files = write(dir.path(), &[("mods/Broken/info.json", b"{")]);

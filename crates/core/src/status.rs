@@ -222,18 +222,21 @@ pub fn statuses(
                         .is_none_or(|n| text.contains(n.as_str()));
                     let (loaded, ended_without) = match &status.block {
                         Some(start) => {
+                            // Each block says it on its own, so a log cut
+                            // short (a crash, a game still starting) counts
+                            // for the plugins it got through.
                             let blocks = blocks_of(text, start, status.needs.as_deref(), &names);
+                            let loaded = |b: &Block| matches(&status.loaded, "", b.text);
                             (
-                                blocks.iter().any(|b| matches(&status.loaded, "", b.text)),
-                                blocks.iter().any(|b| b.ended),
+                                blocks.iter().any(loaded),
+                                blocks.iter().any(|b| b.ended && !loaded(b)),
                             )
                         }
                         None => (
-                            names.iter().any(|n| matches(&status.loaded, n, text)),
+                            complete && names.iter().any(|n| matches(&status.loaded, n, text)),
                             false,
                         ),
                     };
-                    let loaded = complete && loaded;
                     let failed = failed || (!loaded && ended_without);
                     if failed {
                         ModStatus {

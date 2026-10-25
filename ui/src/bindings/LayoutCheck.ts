@@ -13,8 +13,9 @@ checker: string,
  */
 extensions: Array<string>, 
 /**
- * File names it looks at, whatever their extension. A file only gets
- * the first check of each checker that names it.
+ * File names it looks at directly inside a mod's folder
+ * (`<path>/<mod>/<name>`), whatever their extension. A file only gets
+ * the first check of each checker that matches it.
  */
 files: Array<string>, 
 /**

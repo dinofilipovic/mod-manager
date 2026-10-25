@@ -28,6 +28,11 @@ fn hand_installed_mods_are_grouped_and_adopted_in_place() {
                 "bin/x64/plugins/cyber_engine_tweaks/mods/Managed/init.lua".into(),
                 b"return {}".to_vec(),
             ),
+            // A managed add-on inside the hand-installed HandCet below.
+            (
+                "bin/x64/plugins/cyber_engine_tweaks/mods/HandCet/Collabs/pack.lua".into(),
+                b"return {}".to_vec(),
+            ),
         ],
     );
     let id = instance.id.clone();
