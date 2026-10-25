@@ -2,6 +2,7 @@
 //! game detection, the mod library and deployment. Has no UI or Tauri dependency so it can be tested on its own
 //! and shared by the CLI and the desktop app.
 
+pub mod adopt;
 pub mod archive;
 pub mod archive_index;
 pub mod archives;

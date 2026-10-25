@@ -1065,6 +1065,12 @@ impl Store {
         Ok(())
     }
 
+    /// Records one deployed file (a mod adopted from the game folder).
+    pub fn add_deployed_file(&self, instance_id: &str, file: &DeployedFile) -> Result<()> {
+        upsert_deployed(&self.conn, instance_id, file)?;
+        Ok(())
+    }
+
     pub fn set_deployed_at(&self, instance_id: &str, at: i64) -> Result<()> {
         self.conn.execute(
             "INSERT INTO instance_state (instance_id, deployed_at) VALUES (?1, ?2)

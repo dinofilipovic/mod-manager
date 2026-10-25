@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 
+use mm_core::adopt::UnownedGroup;
 use mm_core::archives::{ArchiveRetention, ModArchiveSize};
 use mm_core::collections::{self, Collection};
 use mm_core::dependencies::{DependencyKind, DependencyState};
@@ -1108,6 +1109,37 @@ pub async fn cancel_fomod(app: AppHandle, token: String) -> CommandResult<()> {
             });
         }
         Ok(())
+    })
+    .await
+}
+
+/// Files in the game's mod folders that no mod placed, grouped as mods.
+#[tauri::command]
+pub async fn unowned_mods(app: AppHandle, instance_id: String) -> CommandResult<Vec<UnownedGroup>> {
+    blocking(app, move |_, state| {
+        let (instance, game, _) = state.resolve(&instance_id)?;
+        lock(&state.library)
+            .unowned_mods(game, &instance)
+            .map_err(err)
+    })
+    .await
+}
+
+/// Makes hand-installed files a mod, leaving the game folder as it is.
+#[tauri::command]
+pub async fn adopt_mod(
+    app: AppHandle,
+    instance_id: String,
+    name: String,
+    files: Vec<String>,
+) -> LoadoutResult {
+    blocking(app, move |app, state| {
+        let (instance, game, _) = state.resolve(&instance_id)?;
+        lock(&state.library)
+            .adopt(game, &instance, &name, &files)
+            .map_err(err)?;
+        let _ = app.emit(LIBRARY_CHANGED, ());
+        loadout(state, &instance_id)
     })
     .await
 }

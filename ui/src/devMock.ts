@@ -362,6 +362,18 @@ export function installDevMock() {
         case "reinstall_mod":
         case "rollback_mod":
           return { outcome: { mod: mods[0].mod, skipped: [], warnings: [], replaced_existing: true, replayed_choices: true }, fomod: null };
+        case "unowned_mods":
+          return [
+            {
+              kind: "archive",
+              name: "HandMadeRain",
+              files: ["archive/pc/mod/HandMadeRain.archive", "archive/pc/mod/HandMadeRain.archive.xl"],
+              size_bytes: 28_400_000,
+            },
+            { kind: "cet", name: "SimpleMenu", files: ["bin/x64/plugins/cyber_engine_tweaks/mods/SimpleMenu/init.lua"], size_bytes: 4_100 },
+          ];
+        case "adopt_mod":
+          return loadout();
         case "refresh_mod_status":
           return loadout();
         case "preflight":

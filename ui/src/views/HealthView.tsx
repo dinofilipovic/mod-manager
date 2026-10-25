@@ -4,6 +4,7 @@ import type { ArchiveOrder } from "../bindings/ArchiveOrder";
 import type { DeploymentCheck } from "../bindings/DeploymentCheck";
 import type { DriftKind } from "../bindings/DriftKind";
 import type { UpdateLink } from "../bindings/UpdateLink";
+import type { UnownedGroup } from "../bindings/UnownedGroup";
 import { isUnmet, stateLabel } from "../deps";
 import type { Loadout } from "../bindings/Loadout";
 import type { LogReport } from "../bindings/LogReport";
@@ -120,6 +121,8 @@ export function HealthView({
       <GameFolderCheck instanceId={instanceId} deployedAt={loadout.deployed_at} />
 
       <RequirementsCard instanceId={instanceId} loadout={loadout} onLoadout={onLoadout} />
+
+      <HandInstalledCard instanceId={instanceId} onLoadout={onLoadout} />
 
       <section className="card">
         <h2>Frameworks</h2>
@@ -538,6 +541,76 @@ function RequirementsCard({
           </ul>
         </Dialog>
       )}
+    </section>
+  );
+}
+
+/** Mods put in the game folder by hand, offered for adoption. */
+function HandInstalledCard({ instanceId, onLoadout }: { instanceId: string; onLoadout: (loadout: Loadout) => void }) {
+  const toast = useToast();
+  const [groups, setGroups] = useState<UnownedGroup[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [adopting, setAdopting] = useState<string | null>(null);
+
+  const scan = useCallback(async () => {
+    setError(null);
+    try {
+      setGroups(await api.unownedMods(instanceId));
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }, [instanceId]);
+
+  useEffect(() => {
+    void scan();
+  }, [scan]);
+
+  const adopt = async (g: UnownedGroup) => {
+    setAdopting(g.name);
+    try {
+      onLoadout(await api.adoptMod(instanceId, g.name, g.files));
+      toast("success", `${g.name} is now a mod in your list`, "Its files stayed where they were. Removing it takes them out of the game.");
+      await scan();
+    } catch (e) {
+      toast("error", `Couldn't adopt ${g.name}`, `${errorMessage(e)} Scan again and retry.`);
+    } finally {
+      setAdopting(null);
+    }
+  };
+
+  if (groups && groups.length === 0 && !error) return null;
+  return (
+    <section className="card">
+      <div className="card-head-row">
+        <h2>Installed by hand</h2>
+        <button onClick={scan} disabled={adopting !== null}>
+          <Icon name="refresh" /> Scan again
+        </button>
+      </div>
+      <p className="muted small">
+        Files in the game's mod folders that this app didn't put there. Adopting one copies it into the library and
+        manages it like any other mod; the game folder stays as it is.
+      </p>
+      {error && (
+        <p className="error-text" role="alert">
+          {error} Check that the game folder is reachable, then scan again.
+        </p>
+      )}
+      <ul className="missing-mods">
+        {groups?.map((g) => (
+          <li key={`${g.kind}-${g.name}`}>
+            <span>
+              <strong>{g.name}</strong>{" "}
+              <span className="muted small">
+                {g.kind} · {g.files.length === 1 ? "1 file" : `${g.files.length} files`} · {formatBytes(g.size_bytes)}
+              </span>
+            </span>
+            <button disabled={adopting !== null} onClick={() => adopt(g)}>
+              {adopting === g.name ? "Adopting…" : "Adopt as mod"}
+            </button>
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }

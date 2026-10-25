@@ -1239,6 +1239,160 @@ impl Library {
             .set_changelog(game_domain, nexus_mod_id, now(), entries)
     }
 
+    // Adopting hand-installed mods
+
+    /// Files in the game's mod folders that no mod here placed, grouped
+    /// into the mods they probably are.
+    pub fn unowned_mods(
+        &self,
+        game: &GameDefinition,
+        instance: &GameInstance,
+    ) -> Result<Vec<crate::adopt::UnownedGroup>> {
+        let owned: std::collections::HashSet<String> = self
+            .store
+            .deployed_files(&instance.id)?
+            .into_iter()
+            .map(|d| d.target.to_ascii_lowercase())
+            .collect();
+        Ok(crate::adopt::unowned_groups(
+            game,
+            &instance.install_path,
+            &owned,
+        ))
+    }
+
+    /// Makes hand-installed files a mod: copies them into the library and
+    /// records them as deployed, so the mod manager handles them from now
+    /// on. The game folder isn't changed.
+    pub fn adopt(
+        &mut self,
+        game: &GameDefinition,
+        instance: &GameInstance,
+        name: &str,
+        files: &[String],
+    ) -> Result<InstallOutcome> {
+        let name = non_empty(name, "mod name")?;
+        let owned: std::collections::HashSet<String> = self
+            .store
+            .deployed_files(&instance.id)?
+            .into_iter()
+            .map(|d| d.target.to_ascii_lowercase())
+            .collect();
+        if files.is_empty() {
+            return Err(Error::Install("Choose the files to adopt.".into()));
+        }
+        if let Some(taken) = files
+            .iter()
+            .find(|f| owned.contains(&f.to_ascii_lowercase()))
+        {
+            return Err(Error::Install(format!(
+                "{taken} already belongs to a mod; scan for hand-installed mods again."
+            )));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let staging = self.root.join("tmp").join(format!("{id}.adopt"));
+        let mut mod_files = Vec::new();
+        let mut size_bytes = 0;
+        let copied = (|| {
+            for target in files {
+                let from = resolve_case_insensitive(&instance.install_path, target)
+                    .filter(|p| p.is_file())
+                    .ok_or_else(|| Error::NotFound(target.clone()))?;
+                let to = join_relative(&staging, target);
+                if let Some(parent) = to.parent() {
+                    fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+                }
+                reflink_copy::reflink_or_copy(&from, &to).map_err(|e| Error::io(&to, e))?;
+                let size = fs::metadata(&to).map(|m| m.len()).unwrap_or(0);
+                size_bytes += size;
+                mod_files.push(ModFile {
+                    target: target.clone(),
+                    size: Some(size),
+                    sha256: Some(sha256_file(&to).map_err(|e| Error::io(&to, e))?),
+                });
+            }
+            Ok(())
+        })();
+        if let Err(e) = copied {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+        let final_dir = self.mod_dir(&id);
+        fs::rename(&staging, &final_dir).map_err(|e| Error::io(&final_dir, e))?;
+        let kinds: std::collections::BTreeSet<String> = files
+            .iter()
+            .filter_map(|f| game.layout_for(f).map(|t| t.kind.clone()))
+            .collect();
+        let record = ModRecord {
+            id: id.clone(),
+            game_id: game.id.clone(),
+            name,
+            version: None,
+            author: None,
+            summary: None,
+            picture_url: None,
+            nexus_mod_id: None,
+            nexus_file_id: None,
+            archive_name: None,
+            kinds: kinds.into_iter().collect(),
+            file_count: files.len() as u32,
+            size_bytes,
+            installed_at: now(),
+            revision: 1,
+            update_file_id: None,
+            update_version: None,
+            nexus_updated_at: None,
+            pinned: false,
+            ignored_update_file_id: None,
+        };
+        self.store.insert_mod(&record, &mod_files)?;
+        self.store.insert_revision(&ModRevision {
+            mod_id: id.clone(),
+            revision: 1,
+            archive_id: None,
+            fomod_choices: None,
+            version: None,
+            nexus_file_id: None,
+            installed_at: record.installed_at,
+        })?;
+        // The files stay where they are and count as placed by this mod.
+        for f in &mod_files {
+            let path = deploy::target_path(&instance.install_path, &f.target);
+            let (size, mtime) =
+                crate::fs_util::size_and_mtime(&path).map_err(|e| Error::io(&path, e))?;
+            self.store.add_deployed_file(
+                &instance.id,
+                &crate::store::DeployedFile {
+                    target: f.target.clone(),
+                    mod_id: id.clone(),
+                    revision: 1,
+                    backup: None,
+                    size: Some(size),
+                    mtime: Some(mtime),
+                    sha256: f.sha256.clone(),
+                    backup_sha256: None,
+                    placed_at: Some(now()),
+                },
+            )?;
+        }
+        let profile_id = self.ensure_active_profile(&instance.id)?;
+        let mut entries = self.effective_entries(&game.id, &profile_id)?;
+        entries.retain(|e| e.mod_id != id);
+        entries.push(ProfileEntry {
+            mod_id: id.clone(),
+            enabled: true,
+            priority: 0,
+        });
+        self.save_entries(&profile_id, entries)?;
+        Ok(InstallOutcome {
+            record,
+            skipped: Vec::new(),
+            warnings: Vec::new(),
+            replaced_existing: false,
+            replayed_choices: false,
+        })
+    }
+
     // Before launching
 
     /// What would keep mods from working if the game started now.

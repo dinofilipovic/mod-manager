@@ -147,6 +147,8 @@ fn main() {
             commands::get_missing,
             commands::preflight,
             commands::refresh_mod_status,
+            commands::unowned_mods,
+            commands::adopt_mod,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start the app");

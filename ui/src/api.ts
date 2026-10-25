@@ -32,6 +32,7 @@ import type { ReinstallResult } from "./bindings/ReinstallResult";
 import type { DependencyKind } from "./bindings/DependencyKind";
 import type { RequirementsResult } from "./bindings/RequirementsResult";
 import type { Preflight } from "./bindings/Preflight";
+import type { UnownedGroup } from "./bindings/UnownedGroup";
 import type { RevisionInfo } from "./bindings/RevisionInfo";
 import type { RateLimits } from "./bindings/RateLimits";
 import type { UpdateAllResult } from "./bindings/UpdateAllResult";
@@ -118,6 +119,9 @@ export const api = {
     invoke<Loadout>("add_dependency", { instanceId, modId, kind, target, optional }),
   removeDependency: (instanceId: string, modId: string, kind: DependencyKind, target: string) =>
     invoke<Loadout>("remove_dependency", { instanceId, modId, kind, target }),
+  unownedMods: (instanceId: string) => invoke<UnownedGroup[]>("unowned_mods", { instanceId }),
+  adoptMod: (instanceId: string, name: string, files: string[]) =>
+    invoke<Loadout>("adopt_mod", { instanceId, name, files }),
   refreshModStatus: (instanceId: string) => invoke<Loadout>("refresh_mod_status", { instanceId }),
   preflight: (instanceId: string) => invoke<Preflight>("preflight", { instanceId }),
   getMissing: (instanceId: string) => invoke<UpdateAllResult>("get_missing", { instanceId }),
