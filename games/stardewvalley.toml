@@ -1,0 +1,86 @@
+# Stardew Valley game definition.
+#
+# Almost every mod is a SMAPI mod: a folder with a manifest.json inside the
+# game's Mods folder. Content packs for frameworks such as Content Patcher are
+# the same shape, so one layout target covers nearly everything.
+#
+# Sources: Nexus Mods' Vortex extension (github.com/Nexus-Mods/vortex-games,
+# game-stardewvalley), gogdb.org (product 1453375253), the Content Patcher and
+# SMAPI pages on Nexus Mods.
+
+id = "stardewvalley"
+name = "Stardew Valley"
+# Relative to the install folder. The Windows build's main executable
+# (Vortex: game-stardewvalley/index.ts).
+executable = "Stardew Valley.exe"
+
+# Fallback locations checked when no store metadata points at the game. GOG's
+# install folder is "Stardew Valley/" (gogdb.org, Windows builds).
+known_install_paths = [
+  'C:\GOG Games\Stardew Valley',
+  'C:\Program Files (x86)\GOG Galaxy\Games\Stardew Valley',
+  'C:\Program Files (x86)\Steam\steamapps\common\Stardew Valley',
+]
+
+# SMAPI reads the "Mods" folder; keep that spelling on case-sensitive
+# filesystems.
+canonical_dirs = ["Mods"]
+
+# An archive with a top-level Mods folder is laid out from the game root.
+# "Content" (old XNB replacement mods) is deliberately not a root marker: those
+# overwrite base game files, SMAPI's docs discourage them, and a SMAPI mod with
+# its own Content subfolder would be misread as one.
+root_markers = ["Mods"]
+
+# Top-level keys must come before the first [table] below, or TOML puts them
+# inside that table.
+[stores]
+steam_app_id = "413150"    # Vortex extension (SteamAPPId) and SteamDB
+gog_id = "1453375253"      # gogdb.org product page
+nexus_domain = "stardewvalley"
+
+# Where each kind of mod file is deployed, relative to the install folder.
+# A SMAPI mod or content pack is any folder holding manifest.json; it goes in
+# Mods/<folder name>/. Archives bundling several mods yield several folders.
+[[layout]]
+kind = "smapi"
+path = "Mods"
+marker_file = "manifest.json"
+description = "SMAPI mods and content packs (Mods/<name>/manifest.json)"
+
+# Frameworks other mods build on. `provides` are files that prove it is
+# installed; `requires` lists frameworks it needs itself.
+#
+# SMAPI ships as an installer ("install on Windows.bat" plus install.dat), not
+# as a mod archive, so it can't be deployed from here: run its installer inside
+# the bottle/prefix and it is detected by StardewModdingAPI.exe in the game
+# folder. The game must then be started through StardewModdingAPI.exe rather
+# than "Stardew Valley.exe" (the schema has no alternate-executable field).
+[[frameworks]]
+id = "smapi"
+name = "SMAPI"
+nexus_mod_id = 2400   # Vortex constants.ts: SMAPI_MOD_ID
+provides = ["StardewModdingAPI.exe"]
+
+# Content Patcher is a regular SMAPI mod in Mods/ContentPatcher. Content packs
+# that need it ("[CP] ..." folders with content.json) can't be told apart by
+# extension or folder, so no requirement rule points at it; it is listed so
+# its install state shows up.
+[[frameworks]]
+id = "contentpatcher"
+name = "Content Patcher"
+nexus_mod_id = 1915   # nexusmods.com/stardewvalley/mods/1915
+provides = ["Mods/ContentPatcher/ContentPatcher.dll"]
+requires = ["smapi"]
+
+# Which mod files need which framework: everything in Mods needs SMAPI.
+[[requirements]]
+framework = "smapi"
+paths = ["Mods"]
+
+# No [[logs]]: SMAPI writes SMAPI-latest.txt and SMAPI-crash.txt to
+# %AppData%\StardewValley\ErrorLogs, outside the game folder.
+#
+# No [[wine.dll_overrides]]: SMAPI loads the game as a .NET assembly, no proxy
+# DLL. No [load_order]: SMAPI orders mods by the dependencies in their
+# manifests.

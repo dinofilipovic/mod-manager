@@ -83,8 +83,9 @@ jobs:
           cache: npm
       - run: npm ci
 
+      # Updater artifacts are only signed in the Release workflow.
       - name: Build installers
-        run: npm run build -- --ci
+        run: npm run build -- --ci --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - uses: actions/upload-artifact@v4
         with:

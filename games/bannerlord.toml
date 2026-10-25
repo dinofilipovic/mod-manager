@@ -1,0 +1,100 @@
+# Mount & Blade II: Bannerlord game definition.
+#
+# Every mod is a module: a folder with SubModule.xml inside the game's Modules
+# folder. Modules are switched on in the game's launcher, which saves the
+# selection under Documents (outside this model), so after deploying a mod
+# tick it in the launcher.
+#
+# Sources: the BUTR Vortex extension (github.com/BUTR/game-mount-and-blade2,
+# src/common.ts), the BUTR framework repositories (Bannerlord.Harmony,
+# Bannerlord.ButterLib, Bannerlord.UIExtenderEx, Aragas/Bannerlord.MBOptionScreen:
+# module ids, Nexus ids and dependencies from their SubModule.xml and project
+# files), gogdb.org (product 1564781494).
+
+id = "bannerlord"
+name = "Mount & Blade II: Bannerlord"
+# Relative to the install folder (BUTR: BINARY_FOLDER_STANDARD + BANNERLORD_EXE).
+# The Xbox / Game Pass build uses Gaming.Desktop.x64_Shipping_Client instead
+# and is not covered.
+executable = "bin/Win64_Shipping_Client/Bannerlord.exe"
+
+# Fallback locations checked when no store metadata points at the game. GOG's
+# install folder is "Mount & Blade II Bannerlord/" (gogdb.org build pages).
+known_install_paths = [
+  'C:\GOG Games\Mount & Blade II Bannerlord',
+  'C:\Program Files (x86)\GOG Galaxy\Games\Mount & Blade II Bannerlord',
+]
+
+# Folder names as the game spells them, for case-sensitive filesystems.
+canonical_dirs = ["Modules", "bin", "Win64_Shipping_Client", "ModuleData"]
+
+# An archive with a top-level Modules folder is laid out from the game root.
+# "bin" is deliberately not a root marker: modules carry their own
+# bin/Win64_Shipping_Client, and a module packed without its folder would be
+# dumped into the game's bin. That means BLSE (which ships as bin/...) has to
+# be copied into the game folder by hand; it is still detected below.
+root_markers = ["Modules"]
+
+# Top-level keys must come before the first [table] below, or TOML puts them
+# inside that table.
+[stores]
+steam_app_id = "261550"    # BUTR common.ts: STEAMAPP_ID
+gog_id = "1564781494"      # gogdb.org root product of the game's builds
+nexus_domain = "mountandblade2bannerlord"
+
+# Where each kind of mod file is deployed, relative to the install folder.
+# A module is any folder holding SubModule.xml; it goes in Modules/<folder>/.
+[[layout]]
+kind = "module"
+path = "Modules"
+marker_file = "SubModule.xml"
+description = "Modules (Modules/<name>/SubModule.xml), enable them in the launcher"
+
+# Frameworks other mods build on. `provides` are files that prove it is
+# installed; `requires` lists frameworks it needs itself (the DependedModules
+# in each framework's SubModule.xml).
+#
+# No [[requirements]]: a module declares what it needs in its SubModule.xml
+# (DependedModules), not through file types or folders, so it can't be
+# expressed here. The launcher reports missing dependencies itself.
+[[frameworks]]
+id = "harmony"
+name = "Harmony"
+nexus_mod_id = 2006
+provides = ["Modules/Bannerlord.Harmony/SubModule.xml"]
+
+[[frameworks]]
+id = "butterlib"
+name = "ButterLib"
+nexus_mod_id = 2018
+provides = ["Modules/Bannerlord.ButterLib/SubModule.xml"]
+requires = ["harmony"]
+
+[[frameworks]]
+id = "uiextenderex"
+name = "UIExtenderEx"
+nexus_mod_id = 2102
+provides = ["Modules/Bannerlord.UIExtenderEx/SubModule.xml"]
+requires = ["harmony"]
+
+[[frameworks]]
+id = "mcm"
+name = "Mod Configuration Menu (MCM)"
+nexus_mod_id = 612
+provides = ["Modules/Bannerlord.MBOptionScreen/SubModule.xml"]
+requires = ["harmony", "butterlib", "uiextenderex"]
+
+# Bannerlord Software Extender: an alternative launcher next to the game
+# executable (BUTR common.ts: BLSE_MOD_ID, BLSE_CLI_EXE).
+[[frameworks]]
+id = "blse"
+name = "Bannerlord Software Extender (BLSE)"
+nexus_mod_id = 1
+provides = ["bin/Win64_Shipping_Client/Bannerlord.BLSE.Standalone.exe"]
+
+# No [[logs]]: the game writes logs and crash reports to
+# C:\ProgramData\Mount and Blade II Bannerlord, outside the game folder.
+#
+# No [[wine.dll_overrides]]: Harmony and the other frameworks are managed
+# assemblies loaded by the game, no proxy DLL. No [load_order]: the module
+# order is kept by the launcher under Documents.

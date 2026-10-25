@@ -24,4 +24,8 @@ canonical_dirs: Array<string>,
 /**
  * Top-level game folders; an archive containing one is laid out from the game root.
  */
-root_markers: Array<string>, wine: WineRequirements, launch: LaunchOptions, frameworks: Array<Framework>, requirements: Array<Requirement>, logs: Array<LogSource>, load_order: LoadOrderFile | null, };
+root_markers: Array<string>, wine: WineRequirements, launch: LaunchOptions, frameworks: Array<Framework>, requirements: Array<Requirement>, logs: Array<LogSource>, load_order: LoadOrderFile | null, 
+/**
+ * Windows path of the save folder; `*` matches one folder name (the user).
+ */
+saves: string | null, };

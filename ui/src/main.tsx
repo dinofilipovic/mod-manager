@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
+import { FomodQueueProvider } from "./components/FomodQueue";
 import { ToastProvider } from "./components/Toasts";
 import "./styles.css";
 
@@ -13,7 +14,9 @@ if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window)) {
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ToastProvider>
-      <App />
+      <FomodQueueProvider>
+        <App />
+      </FomodQueueProvider>
     </ToastProvider>
   </StrictMode>,
 );

@@ -1,0 +1,88 @@
+# The Witcher 3: Wild Hunt game definition.
+#
+# Mods live in the game folder: Mods/mod<Name>/content/... for regular mods,
+# DLC/dlc<Name>/content/... for DLC-style mods, and bin/config/... for menu
+# and input changes. The game loads Mods/ alphabetically; the optional
+# mods.settings load order lives in Documents\The Witcher 3 and is not
+# handled here. Script conflicts are resolved with Script Merger, a separate
+# tool.
+#
+# Archives packed as "modFoo/content/..." (without a Mods folder around them)
+# are recognised by their `content` subfolder and installed under Mods/.
+#
+# Sources: Nexus Mods' Vortex extension (github.com/Nexus-Mods/vortex-games,
+# game-witcher3: index.ts, common.ts, installers.ts), gogdb.org.
+
+id = "witcher3"
+name = "The Witcher 3: Wild Hunt"
+# Relative to the install folder. Present in both the classic and next-gen
+# (4.0+) builds; next-gen adds bin/x64_dx12/witcher3.exe (Vortex index.ts).
+executable = "bin/x64/witcher3.exe"
+
+# Fallback locations checked when no store metadata points at the game. GOG
+# install folders per gogdb.org: "The Witcher 3 Wild Hunt/" (product
+# 1207664643) and "The Witcher 3 Wild Hunt GOTY/" (product 1495134320).
+known_install_paths = [
+  'C:\GOG Games\The Witcher 3 Wild Hunt GOTY',
+  'C:\GOG Games\The Witcher 3 Wild Hunt',
+  'C:\Program Files (x86)\GOG Galaxy\Games\The Witcher 3 Wild Hunt GOTY',
+  'C:\Program Files (x86)\GOG Galaxy\Games\The Witcher 3 Wild Hunt',
+]
+
+# Folder names as the game (and Vortex) spell them, for case-sensitive
+# filesystems: Vortex creates "Mods" and "DLC"; the rest are lowercase.
+canonical_dirs = [
+  "Mods", "DLC", "bin", "content", "scripts", "config", "r4game",
+  "user_config_matrix", "pc", "x64",
+]
+
+# Top-level folders of the game. An archive containing any of these is laid
+# out from the game root and installed as-is.
+root_markers = ["Mods", "DLC", "bin"]
+
+# Top-level keys must come before the first [table] below, or TOML puts them
+# inside that table.
+[stores]
+steam_app_id = "292030"    # Vortex index.ts: STEAM_ID_WH / SteamAPPId
+# The base game product (gogdb.org: "The Witcher 3: Wild Hunt — Remastered",
+# included in the Complete Edition package 1207664663). GOTY owners have
+# product 1495134320 instead; the schema takes one id, so they are found via
+# known_install_paths.
+gog_id = "1207664643"
+nexus_domain = "witcher3"
+
+# Where each kind of mod file is deployed, relative to the install folder.
+# No extensions or markers: W3 mod files (.bundle, .ws, .store, .cache, .xml)
+# only make sense inside their mod folder, so loose files are never routed.
+[[layout]]
+kind = "mod"
+path = "Mods"
+marker_folder = "content"
+description = "Mods (Mods/mod<Name>/content/...)"
+
+[[layout]]
+kind = "dlc"
+path = "DLC"
+description = "DLC-style mods (DLC/dlc<Name>/content/...)"
+
+[[layout]]
+kind = "menu"
+path = "bin/config/r4game/user_config_matrix/pc"
+description = "Menu mods (in-game options XML)"
+
+[[layout]]
+kind = "config"
+path = "bin/config"
+description = "Game configuration (input and other config files)"
+
+# No [[frameworks]] / [[requirements]]: W3 has no script extender that other
+# mods hook into through files in the game folder. Community Patch - Base
+# overwrites the game's own content/content0/scripts and Script Merger is an
+# external tool, so neither fits the framework model.
+#
+# No [[logs]]: no log file inside the game folder could be verified (the
+# game's own files, such as mods.settings and input.settings, are under
+# Documents\The Witcher 3).
+#
+# No [[wine.dll_overrides]] and no [load_order] (mods.settings is in
+# Documents).

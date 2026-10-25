@@ -250,7 +250,8 @@ fn expand(root: &Path, pattern: &str) -> Vec<PathBuf> {
     current
 }
 
-fn wildcard_match(pattern: &str, name: &str) -> bool {
+/// Case-insensitive match where `*` matches any run of characters.
+pub fn wildcard_match(pattern: &str, name: &str) -> bool {
     let (pattern, name) = (pattern.to_ascii_lowercase(), name.to_ascii_lowercase());
     let parts: Vec<&str> = pattern.split('*').collect();
     if parts.len() == 1 {

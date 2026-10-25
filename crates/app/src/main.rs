@@ -16,10 +16,15 @@ use crate::state::AppState;
 
 /// Sent to the UI when an `nxm://` link couldn't be started.
 const NXM_ERROR: &str = "nxm-error";
+/// Sent to the UI with an `nxm://` collection link to show.
+const OPEN_COLLECTION: &str = "open-collection";
 
 fn handle_links(app: &AppHandle, urls: impl IntoIterator<Item = String>) {
     for url in urls.into_iter().filter(|u| u.starts_with("nxm:")) {
-        if let Err(message) = downloads::start_nxm(app, &url) {
+        // Collection links open the collection in the app for review.
+        if mm_core::collections::parse_collection_link(&url).is_ok() {
+            let _ = app.emit(OPEN_COLLECTION, url);
+        } else if let Err(message) = downloads::start_nxm(app, &url) {
             let _ = app.emit(NXM_ERROR, message);
         }
     }
@@ -39,6 +44,8 @@ fn main() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let games = game::builtin_games()?;
             let library = Library::open(&Library::default_root())?;
@@ -93,6 +100,20 @@ fn main() {
             commands::clear_finished_downloads,
             commands::check_updates,
             commands::update_mod,
+            commands::get_fomod,
+            commands::fomod_state,
+            commands::fomod_image,
+            commands::finish_fomod,
+            commands::cancel_fomod,
+            commands::saves_info,
+            commands::backup_saves,
+            commands::restore_saves,
+            commands::delete_save_backup,
+            commands::set_auto_save_backup,
+            commands::export_profile,
+            commands::import_profile,
+            commands::open_collection,
+            commands::install_collection,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start the app");

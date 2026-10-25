@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::env::{Environment, Hive};
+use crate::env::{Environment, EnvironmentKind, Hive};
 use crate::fs_util::{canonical_or_self, resolve_case_insensitive};
 use crate::game::GameDefinition;
 use crate::vdf;
@@ -40,6 +40,10 @@ pub struct GameInstance {
     pub build_id: Option<String>,
     /// Changes whenever the game's executable changes (size, date, build).
     pub fingerprint: String,
+    /// The launcher's id for the game, e.g. Epic's app name.
+    pub launch_id: Option<String>,
+    /// Steam launch options to set by hand (Proton), when the game needs any.
+    pub launch_options_hint: Option<String>,
     /// State of the Wine DLL overrides the game's mod loaders need.
     pub dll_overrides: Vec<DllOverrideStatus>,
 }
@@ -66,31 +70,46 @@ pub fn detect_all(games: &[GameDefinition], environments: &[Environment]) -> Vec
 
 /// Detects installs of one game in one environment.
 pub fn detect_game(game: &GameDefinition, env: &Environment) -> Vec<GameInstance> {
-    let candidates = steam_candidates(game, env)
+    // A Proton prefix belongs to exactly one Steam game.
+    if let EnvironmentKind::Proton { app_id, .. } = &env.kind
+        && game.stores.steam_app_id.as_ref() != Some(app_id)
+    {
+        return Vec::new();
+    }
+    let is_proton = matches!(env.kind, EnvironmentKind::Proton { .. });
+    let steam = steam_candidates(game, env)
         .into_iter()
-        .map(|p| (Store::Steam, p))
-        .chain(
-            gog_candidates(game, env)
-                .into_iter()
-                .map(|p| (Store::Gog, p)),
-        )
-        .chain(epic_candidates(env).into_iter().map(|p| (Store::Epic, p)))
-        .chain(
-            game.known_install_paths
-                .iter()
-                .filter_map(|p| env.windows_to_host(p))
-                .map(|p| (Store::KnownPath, p)),
-        );
+        .map(|p| (Store::Steam, p, None));
+    let others: Vec<(Store, PathBuf, Option<String>)> = if is_proton {
+        Vec::new()
+    } else {
+        gog_candidates(game, env)
+            .into_iter()
+            .map(|p| (Store::Gog, p, None))
+            .chain(
+                epic_candidates(env)
+                    .into_iter()
+                    .map(|(p, app)| (Store::Epic, p, Some(app))),
+            )
+            .chain(
+                game.known_install_paths
+                    .iter()
+                    .filter_map(|p| env.windows_to_host(p))
+                    .map(|p| (Store::KnownPath, p, None)),
+            )
+            .collect()
+    };
+    let candidates = steam.chain(others);
 
     let overrides = env.dll_overrides().unwrap_or_default();
     let mut seen = HashSet::new();
     candidates
-        .filter(|(_, path)| {
+        .filter(|(_, path, _)| {
             resolve_case_insensitive(path, &game.executable).is_some_and(|exe| exe.is_file())
         })
-        .map(|(store, path)| (store, canonical_or_self(path)))
-        .filter(|(_, path)| seen.insert(path.clone()))
-        .map(|(store, install_path)| {
+        .map(|(store, path, launch_id)| (store, canonical_or_self(path), launch_id))
+        .filter(|(_, path, _)| seen.insert(path.clone()))
+        .map(|(store, install_path, launch_id)| {
             let exe = resolve_case_insensitive(&install_path, &game.executable);
             let build_id = (store == Store::Steam)
                 .then(|| steam_build_id(game, &install_path))
@@ -120,11 +139,42 @@ pub fn detect_game(game: &GameDefinition, env: &Environment) -> Vec<GameInstance
                 version: exe.as_deref().and_then(exe_version),
                 build_id,
                 fingerprint,
+                launch_id,
+                launch_options_hint: is_proton.then(|| proton_launch_options(game)).flatten(),
                 install_path,
-                dll_overrides: dll_override_status(game, &overrides),
+                // Proton takes overrides from launch options, Windows needs none.
+                dll_overrides: if env.is_wine() && !is_proton {
+                    dll_override_status(game, &overrides)
+                } else {
+                    Vec::new()
+                },
             }
         })
         .collect()
+}
+
+/// Steam launch options a Proton game needs: Wine DLL overrides go in
+/// `WINEDLLOVERRIDES`, and the game's modded arguments follow `%command%`.
+fn proton_launch_options(game: &GameDefinition) -> Option<String> {
+    let dlls: Vec<&str> = game
+        .wine
+        .dll_overrides
+        .iter()
+        .map(|d| d.dll.as_str())
+        .collect();
+    if dlls.is_empty() && game.launch.modded_args.is_empty() {
+        return None;
+    }
+    let mut options = String::new();
+    if !dlls.is_empty() {
+        options.push_str(&format!("WINEDLLOVERRIDES=\"{}=n,b\" ", dlls.join(",")));
+    }
+    options.push_str("%command%");
+    for arg in &game.launch.modded_args {
+        options.push(' ');
+        options.push_str(arg);
+    }
+    Some(options)
 }
 
 /// The product version in a Windows executable's version resource.
@@ -192,36 +242,39 @@ fn dll_override_status(
         .collect()
 }
 
-const STEAM_ROOTS: &[&str] = &[r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"];
+/// All library folders of a Steam install (the install itself first).
+/// `to_host` converts paths written in `libraryfolders.vdf`.
+pub fn steam_libraries(
+    root: &std::path::Path,
+    to_host: impl Fn(&str) -> Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut libraries = vec![root.to_path_buf()];
+    if let Some(doc) = read_vdf(root, "steamapps/libraryfolders.vdf")
+        && let Some(folders) = doc.get("libraryfolders")
+    {
+        libraries.extend(
+            folders
+                .entries()
+                .iter()
+                .filter_map(|(_, folder)| folder.get_str("path"))
+                .filter_map(&to_host),
+        );
+    }
+    let mut seen = HashSet::new();
+    libraries
+        .into_iter()
+        .filter(|lib| seen.insert(canonical_or_self(lib.clone())))
+        .collect()
+}
 
 /// Reads Steam's library list and the game's app manifest in each library.
 fn steam_candidates(game: &GameDefinition, env: &Environment) -> Vec<PathBuf> {
     let Some(app_id) = &game.stores.steam_app_id else {
         return Vec::new();
     };
-    let mut libraries = Vec::new();
-    for root in STEAM_ROOTS.iter().filter_map(|r| env.windows_to_host(r)) {
-        if !root.is_dir() {
-            continue;
-        }
-        if let Some(doc) = read_vdf(&root, "steamapps/libraryfolders.vdf")
-            && let Some(folders) = doc.get("libraryfolders")
-        {
-            libraries.extend(
-                folders
-                    .entries()
-                    .iter()
-                    .filter_map(|(_, folder)| folder.get_str("path"))
-                    .filter_map(|path| env.windows_to_host(path)),
-            );
-        }
-        libraries.push(root);
-    }
-
-    let mut seen = HashSet::new();
-    libraries
-        .into_iter()
-        .filter(|lib| seen.insert(canonical_or_self(lib.clone())))
+    env.steam_roots()
+        .iter()
+        .flat_map(|root| steam_libraries(root, |p| env.launcher_path(p)))
         .filter_map(|lib| {
             let manifest = read_vdf(&lib, &format!("steamapps/appmanifest_{app_id}.acf"))?;
             let install_dir = manifest.get("AppState")?.get_str("installdir")?;
@@ -251,9 +304,10 @@ fn gog_candidates(game: &GameDefinition, env: &Environment) -> Vec<PathBuf> {
 }
 
 /// The Epic launcher writes one JSON manifest per installed game. Manifests
-/// identify games by opaque IDs, so every install location is returned and
-/// the executable check in `detect_game` picks the right one.
-fn epic_candidates(env: &Environment) -> Vec<PathBuf> {
+/// identify games by opaque IDs, so every install location is returned (with
+/// its app name, used to launch it) and the executable check in
+/// `detect_game` picks the right one.
+fn epic_candidates(env: &Environment) -> Vec<(PathBuf, String)> {
     let Some(dir) = env.windows_to_host(r"C:\ProgramData\Epic\EpicGamesLauncher\Data\Manifests")
     else {
         return Vec::new();
@@ -271,9 +325,12 @@ fn epic_candidates(env: &Environment) -> Vec<PathBuf> {
         .filter_map(|p| fs::read_to_string(p).ok())
         .filter_map(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .filter_map(|json| {
-            json.get("InstallLocation")?
+            let path = json
+                .get("InstallLocation")?
                 .as_str()
-                .and_then(|p| env.windows_to_host(p))
+                .and_then(|p| env.windows_to_host(p))?;
+            let app = json.get("AppName")?.as_str()?.to_string();
+            Some((path, app))
         })
         .collect()
 }
@@ -352,6 +409,34 @@ mod tests {
             "GOG registry hit and known path are the same folder"
         );
         assert_eq!(found[0].store, Store::Gog);
+    }
+
+    #[test]
+    fn finds_proton_game_in_linux_steam_library() {
+        let tmp = tempfile::tempdir().unwrap();
+        let steam = tmp.path().join("Steam");
+        let steamapps = steam.join("steamapps");
+        fs::create_dir_all(steamapps.join("compatdata/1091500/pfx/drive_c")).unwrap();
+        fs::write(steamapps.join("compatdata/1091500/pfx/system.reg"), "").unwrap();
+        fs::write(
+            steamapps.join("appmanifest_1091500.acf"),
+            r#""AppState" { "appid" "1091500" "installdir" "Cyberpunk 2077" "buildid" "42" }"#,
+        )
+        .unwrap();
+        install_game(&steamapps.join("common/Cyberpunk 2077"));
+
+        let envs =
+            crate::env::proton::discover_in(std::slice::from_ref(&steam), &["1091500".into()]);
+        assert_eq!(envs.len(), 1);
+        let found = detect_game(&find_builtin("cyberpunk2077").unwrap(), &envs[0]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].build_id.as_deref(), Some("42"));
+        assert!(found[0].dll_overrides.is_empty());
+        let hint = found[0].launch_options_hint.as_deref().unwrap();
+        assert_eq!(
+            hint,
+            r#"WINEDLLOVERRIDES="version,winmm=n,b" %command% -modded"#
+        );
     }
 
     #[test]

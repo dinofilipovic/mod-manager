@@ -5,6 +5,7 @@ import type { NexusStatus } from "../bindings/NexusStatus";
 import { Icon } from "../components/Icon";
 import { useToast } from "../components/Toasts";
 import { formatBytes } from "../format";
+import type { Updater } from "../updater";
 
 /** Longest we wait for Nexus before telling the user something is wrong. */
 const CONNECT_TIMEOUT_MS = 45_000;
@@ -15,10 +16,12 @@ export function SettingsView({
   nexus,
   onNexusChange,
   onNexusStatus,
+  updater,
 }: {
   nexus: NexusStatus | null;
   onNexusChange: () => Promise<void>;
   onNexusStatus: (status: NexusStatus) => void;
+  updater: Updater;
 }) {
   const toast = useToast();
   const [key, setKey] = useState("");
@@ -203,6 +206,44 @@ export function SettingsView({
             space. Hard links or copies otherwise.
           </dd>
         </dl>
+      </section>
+
+      <section className="card">
+        <div className="card-head-row">
+          <h2>App updates</h2>
+          <button
+            onClick={async () => {
+              const found = await updater.checkNow();
+              if (!found && !updater.error) toast("success", "You have the latest version");
+            }}
+            disabled={updater.checking || updater.progress !== null}
+          >
+            <Icon name="refresh" className={updater.checking ? "spin" : undefined} /> Check now
+          </button>
+        </div>
+        {updater.available ? (
+          <div className="notice notice-info">
+            <Icon name="sparkle" />
+            <div>
+              <strong>Version {updater.available.version} is available</strong>
+              <p>{updater.available.body?.trim() || "Installs in the background, then the app restarts."}</p>
+              {updater.progress !== null && (
+                <div className="progress">
+                  <span style={{ width: `${Math.round(updater.progress * 100)}%` }} />
+                </div>
+              )}
+            </div>
+            <button className="primary" onClick={updater.install} disabled={updater.progress !== null}>
+              {updater.progress !== null ? "Installing…" : "Install and restart"}
+            </button>
+          </div>
+        ) : (
+          <p className="muted small">
+            {updater.error
+              ? `Couldn't check for updates: ${updater.error}`
+              : "The app checks for a new version each time it starts."}
+          </p>
+        )}
       </section>
 
       <section className="card">

@@ -14,6 +14,8 @@ pub struct AppState {
     pub downloads: Mutex<Vec<Download>>,
     /// The install the user is looking at, per game; `nxm://` downloads go there.
     pub current_instance: Mutex<HashMap<String, String>>,
+    /// Downloads waiting on FOMOD choices: installer token -> download id.
+    pub fomod_downloads: Mutex<HashMap<String, String>>,
 }
 
 /// Errors cross the IPC boundary as plain messages.
@@ -38,6 +40,7 @@ impl AppState {
             scan: Mutex::new(None),
             downloads: Mutex::new(Vec::new()),
             current_instance: Mutex::new(HashMap::new()),
+            fomod_downloads: Mutex::new(HashMap::new()),
         }
     }
 

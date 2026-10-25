@@ -272,7 +272,13 @@ fn pick_instance(id: Option<String>) -> Result<(GameDefinition, GameInstance)> {
 fn environments(bottles_dir: Option<PathBuf>) -> Result<Vec<Environment>> {
     Ok(match bottles_dir {
         Some(dir) => crossover::discover_bottles(&dir)?,
-        None => env::discover(),
+        None => {
+            let steam_ids: Vec<String> = game::builtin_games()?
+                .iter()
+                .filter_map(|g| g.stores.steam_app_id.clone())
+                .collect();
+            env::discover(&steam_ids)
+        }
     })
 }
 
@@ -328,5 +334,7 @@ fn describe_env(env: &Environment) -> String {
             crossover_version.as_deref().unwrap_or("?")
         ),
         EnvironmentKind::WinePrefix => format!("Wine prefix {}", env.name),
+        EnvironmentKind::Proton { app_id, .. } => format!("Proton prefix for Steam app {app_id}"),
+        EnvironmentKind::Native => "Windows".into(),
     }
 }

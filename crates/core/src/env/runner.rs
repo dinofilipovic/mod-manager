@@ -52,6 +52,10 @@ impl Environment {
                 cmd.env("WINEPREFIX", &self.prefix);
                 Ok(cmd)
             }
+            EnvironmentKind::Proton { .. } => Err(Error::Wine(
+                "Proton prefixes are managed by Steam; set Wine options in the game's launch options.".into(),
+            )),
+            EnvironmentKind::Native => Err(Error::Wine("Windows runs games directly, without Wine.".into())),
         }
     }
 
@@ -71,6 +75,9 @@ impl Environment {
     /// `native,builtin`. Runs `reg add` inside the prefix so Wine applies it
     /// even while the bottle is running.
     pub fn set_dll_overrides(&self, overrides: &[(String, String)]) -> Result<()> {
+        if !self.is_wine() {
+            return Ok(());
+        }
         for (dll, mode) in overrides {
             let output = self
                 .wine_command()?
@@ -97,8 +104,10 @@ impl Environment {
         Ok(())
     }
 
-    /// Starts the game without waiting for it. Steam installs launch through
-    /// the bottle's Steam client so DRM and overlays work.
+    /// Starts the game without waiting for it, through its store's client
+    /// where that matters: Steam (DRM, overlay) and Epic (ownership check).
+    /// GOG games are DRM-free and start directly, which keeps the modded
+    /// arguments Galaxy wouldn't pass on.
     pub fn launch_game(
         &self,
         game: &GameDefinition,
@@ -110,34 +119,102 @@ impl Environment {
         } else {
             Vec::new()
         };
-        let mut cmd = self.wine_command()?;
-        let steam = self.windows_to_host(r"C:\Program Files (x86)\Steam\steam.exe");
-        match (&instance.store, &game.stores.steam_app_id, steam) {
-            (Store::Steam, Some(app_id), Some(steam)) if steam.is_file() => {
-                cmd.arg(r"C:\Program Files (x86)\Steam\steam.exe")
-                    .arg("-applaunch")
-                    .arg(app_id)
-                    .args(&args);
+        let steam_id = game
+            .stores
+            .steam_app_id
+            .as_deref()
+            .filter(|_| instance.store == Store::Steam);
+        let epic_url = instance
+            .launch_id
+            .as_deref()
+            .filter(|_| instance.store == Store::Epic)
+            .map(|app| format!("com.epicgames.launcher://apps/{app}?action=launch&silent=true"));
+
+        let mut cmd = match &self.kind {
+            EnvironmentKind::Proton { app_id, .. } => {
+                // Steam starts the game with the launch options set in Steam.
+                return spawn(steam_url_command(&format!("steam://rungameid/{app_id}")));
             }
-            _ => {
-                let exe = resolve_case_insensitive(&instance.install_path, &game.executable)
-                    .ok_or_else(|| Error::Wine("the game executable is missing".into()))?;
-                let windows_exe = self.host_to_windows(&exe).ok_or_else(|| {
-                    Error::Wine("the game isn't inside this bottle's C: drive".into())
-                })?;
-                if let Some(dir) = exe.parent() {
-                    cmd.current_dir(dir);
+            EnvironmentKind::Native => match (steam_id, &epic_url) {
+                (Some(id), _) => {
+                    return spawn(steam_url_command(&format!(
+                        "steam://run/{id}//{}/",
+                        args.join(" ")
+                    )));
                 }
-                cmd.arg(windows_exe).args(&args);
+                (None, Some(url)) => return spawn(steam_url_command(url)),
+                _ => {
+                    let exe = self.game_exe(game, instance)?;
+                    let mut cmd = Command::new(&exe);
+                    if let Some(dir) = exe.parent() {
+                        cmd.current_dir(dir);
+                    }
+                    cmd.args(&args);
+                    cmd
+                }
+            },
+            _ => {
+                let mut cmd = self.wine_command()?;
+                let steam = self.windows_to_host(r"C:\Program Files (x86)\Steam\steam.exe");
+                let epic = self.windows_to_host(
+                    r"C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe",
+                );
+                match (steam_id, &epic_url) {
+                    (Some(id), _) if steam.is_some_and(|s| s.is_file()) => {
+                        cmd.arg(r"C:\Program Files (x86)\Steam\steam.exe")
+                            .arg("-applaunch")
+                            .arg(id)
+                            .args(&args);
+                    }
+                    (None, Some(url)) if epic.is_some_and(|e| e.is_file()) => {
+                        cmd.arg("start").arg(url);
+                    }
+                    _ => {
+                        let exe = self.game_exe(game, instance)?;
+                        let windows_exe = self.host_to_windows(&exe).ok_or_else(|| {
+                            Error::Wine("the game isn't inside this bottle's C: drive".into())
+                        })?;
+                        if let Some(dir) = exe.parent() {
+                            cmd.current_dir(dir);
+                        }
+                        cmd.arg(windows_exe).args(&args);
+                    }
+                }
+                cmd
             }
-        }
+        };
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| Error::Wine(format!("couldn't start the game: {e}")))?;
-        Ok(())
+            .stderr(Stdio::null());
+        spawn(cmd)
     }
+
+    fn game_exe(&self, game: &GameDefinition, instance: &GameInstance) -> Result<PathBuf> {
+        resolve_case_insensitive(&instance.install_path, &game.executable)
+            .ok_or_else(|| Error::Wine("the game executable is missing".into()))
+    }
+}
+
+/// Opens a launcher URL (`steam://`, `com.epicgames.launcher://`) with the
+/// host's URL handler.
+fn steam_url_command(url: &str) -> Command {
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    } else if cfg!(target_os = "macos") {
+        Command::new("open")
+    } else {
+        Command::new("xdg-open")
+    };
+    cmd.arg(url);
+    cmd
+}
+
+fn spawn(mut cmd: Command) -> Result<()> {
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| Error::Wine(format!("couldn't start the game: {e}")))
 }
 
 #[cfg(test)]

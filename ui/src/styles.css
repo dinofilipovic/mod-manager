@@ -1801,3 +1801,218 @@ input::placeholder {
 .dialog:has(.log-view) {
   width: min(900px, calc(100vw - 32px));
 }
+
+/* FOMOD wizard */
+
+.dialog.fomod {
+  width: min(960px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+}
+
+.dialog.fomod[open] {
+  display: flex;
+}
+
+.fomod-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.fomod-steps {
+  display: flex;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.fomod-steps li {
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.fomod-steps li.active {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.fomod-steps li.done {
+  color: var(--text);
+}
+
+.fomod-body {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 16px;
+  min-height: 0;
+  overflow: hidden;
+  flex: 1;
+}
+
+.fomod-groups {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-right: 4px;
+}
+
+.fomod-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px 10px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fomod-group legend {
+  font-weight: 600;
+  padding: 0 4px;
+}
+
+.fomod-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.fomod-option:hover {
+  background: var(--hover);
+}
+
+.fomod-option.chosen {
+  background: var(--accent-soft);
+}
+
+.fomod-option.unusable {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.fomod-option .badge {
+  margin-left: auto;
+}
+
+.fomod-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+}
+
+.fomod-preview img,
+.fomod-noimage {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: contain;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.fomod-noimage {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.fomod-description {
+  font-size: 13px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.dialog-actions .spacer {
+  flex: 1;
+}
+
+@media (max-width: 760px) {
+  .fomod-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Saves, collections, imports */
+
+.backups,
+.collection-mods,
+.missing-mods {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.backups li,
+.collection-mods li,
+.missing-mods li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.backups li:first-child,
+.collection-mods li:first-child,
+.missing-mods li:first-child {
+  border-top: none;
+}
+
+.collection-mods li.installed {
+  opacity: 0.7;
+}
+
+.collection-mod-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.check-spacer {
+  width: 13px;
+}
+
+input.grow {
+  flex: 1;
+}
+
+.update-pill {
+  margin-top: auto;
+  justify-content: center;
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.update-pill + .account {
+  margin-top: 0;
+}
+
+.copyable {
+  display: block;
+  margin-top: 6px;
+  padding: 6px 8px;
+  word-break: break-all;
+}

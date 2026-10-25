@@ -6,12 +6,18 @@ import type { ScanResult } from "./bindings/ScanResult";
 import type { GameDefinition } from "./bindings/GameDefinition";
 import { Sidebar } from "./components/Sidebar";
 import { useToast } from "./components/Toasts";
+import { CollectionsView } from "./views/CollectionsView";
 import { DownloadsView } from "./views/DownloadsView";
+import { useUpdater } from "./updater";
 import { GameView } from "./views/GameView";
 import { SettingsView } from "./views/SettingsView";
 import { Welcome } from "./views/Welcome";
 
-export type View = { kind: "game"; instanceId: string } | { kind: "downloads" } | { kind: "settings" };
+export type View =
+  | { kind: "game"; instanceId: string }
+  | { kind: "downloads" }
+  | { kind: "collections"; link?: string }
+  | { kind: "settings" };
 
 export function App() {
   const toast = useToast();
@@ -21,6 +27,7 @@ export function App() {
   const [view, setView] = useState<View | null>(null);
   const [downloads, setDownloads] = useState<Download[]>([]);
   const [nexus, setNexus] = useState<NexusStatus | null>(null);
+  const updater = useUpdater();
 
   const rescan = useCallback(async () => {
     setScanning(true);
@@ -49,6 +56,7 @@ export function App() {
     const unlisten = [
       events.downloadsChanged(setDownloads),
       events.nxmError((message) => toast("error", "Couldn't start the download", message)),
+      events.openCollection((link) => setView({ kind: "collections", link })),
     ];
     return () => unlisten.forEach((u) => void u.then((f) => f()));
   }, [rescan, refreshNexus, toast]);
@@ -87,7 +95,9 @@ export function App() {
     return instance && env && game ? { instance, env, game } : null;
   }, [scan, view, games]);
 
-  const activeDownloads = downloads.filter((d) => ["Queued", "Downloading", "Installing"].includes(d.status.state)).length;
+  const activeDownloads = downloads.filter((d) =>
+    ["Queued", "Downloading", "Installing", "AwaitingChoices"].includes(d.status.state),
+  ).length;
 
   return (
     <div className="shell">
@@ -99,12 +109,27 @@ export function App() {
         onRescan={rescan}
         activeDownloads={activeDownloads}
         nexus={nexus}
+        updateAvailable={updater.available?.version ?? null}
       />
       <main className="content">
         {view?.kind === "downloads" ? (
           <DownloadsView downloads={downloads} games={games} nexus={nexus} onDownloads={setDownloads} onNavigate={setView} />
+        ) : view?.kind === "collections" ? (
+          <CollectionsView
+            initialLink={view.link ?? null}
+            games={games}
+            nexus={nexus}
+            onNavigate={setView}
+            loadInstalled={async (domain) => {
+              const game = games.find((g) => g.stores.nexus_domain === domain);
+              const instance = scan?.instances.find((i) => i.game_id === game?.id);
+              if (!instance) return new Set();
+              const loadout = await api.loadout(instance.id);
+              return new Set(loadout.mods.flatMap((m) => (m.mod.nexus_file_id ? [m.mod.nexus_file_id] : [])));
+            }}
+          />
         ) : view?.kind === "settings" ? (
-          <SettingsView nexus={nexus} onNexusChange={refreshNexus} onNexusStatus={setNexus} />
+          <SettingsView nexus={nexus} onNexusChange={refreshNexus} onNexusStatus={setNexus} updater={updater} />
         ) : current ? (
           <GameView
             key={current.instance.id}

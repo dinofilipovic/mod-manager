@@ -6,7 +6,12 @@ use ts_rs::TS;
 
 use crate::error::{Error, Result};
 
-const BUILTIN_GAMES: &[&str] = &[include_str!("../../../games/cyberpunk2077.toml")];
+const BUILTIN_GAMES: &[&str] = &[
+    include_str!("../../../games/cyberpunk2077.toml"),
+    include_str!("../../../games/witcher3.toml"),
+    include_str!("../../../games/stardewvalley.toml"),
+    include_str!("../../../games/bannerlord.toml"),
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -40,6 +45,8 @@ pub struct GameDefinition {
     #[serde(default)]
     pub logs: Vec<LogSource>,
     pub load_order: Option<LoadOrderFile>,
+    /// Windows path of the save folder; `*` matches one folder name (the user).
+    pub saves: Option<String>,
 }
 
 /// A framework other mods depend on, such as a script extender.
@@ -126,6 +133,10 @@ pub struct LayoutTarget {
     /// A file whose folder is one mod of this kind (e.g. `init.lua` for CET).
     #[serde(default)]
     pub marker_file: Option<String>,
+    /// A folder name whose parent folder is one mod of this kind (e.g.
+    /// `content` for The Witcher 3's `modFoo/content/...`).
+    #[serde(default)]
+    pub marker_folder: Option<String>,
     /// Put matching files directly in `path`, dropping their folders.
     #[serde(default)]
     pub flatten: bool,

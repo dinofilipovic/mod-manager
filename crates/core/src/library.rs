@@ -20,13 +20,16 @@ use walkdir::WalkDir;
 use crate::archive;
 use crate::deploy::{self, DeployReport, DesiredFile};
 use crate::detect::GameInstance;
+use crate::env::Environment;
 use crate::error::{Error, Result};
+use crate::fomod;
 use crate::fs_util::resolve_case_insensitive;
 use crate::game::GameDefinition;
 use crate::health;
 use crate::installer::{self, InstallPlan};
 use crate::nexus::{NexusMatch, parse_archive_name};
 use crate::requirements::{self, FrameworkState, FrameworkStatus, MissingRequirement, ModFiles};
+use crate::saves;
 use crate::store::{ModRecord, Profile, ProfileEntry, Store};
 
 /// What is known about a mod before installing it.
@@ -129,12 +132,86 @@ pub struct LoadoutMod {
     pub missing_requirements: Vec<MissingRequirement>,
 }
 
+const PROFILE_FORMAT: &str = "mod-manager-profile";
+
+/// A profile written to a file for sharing or moving to another machine.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct ProfileExport {
+    pub format: String,
+    pub version: u32,
+    pub game_id: String,
+    pub name: String,
+    #[ts(type = "number")]
+    pub exported_at: i64,
+    /// In load order.
+    pub mods: Vec<ExportedMod>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct ExportedMod {
+    pub name: String,
+    pub version: Option<String>,
+    pub enabled: bool,
+    pub nexus_mod_id: Option<u32>,
+    pub nexus_file_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ImportReport {
+    pub profile_id: String,
+    pub profile_name: String,
+    pub matched: u32,
+    /// Enabled mods in the file that aren't in this library.
+    pub missing: Vec<ExportedMod>,
+}
+
 /// Owner recorded for the generated load-order file in the deployment record.
 pub const LOAD_ORDER_FILE_OWNER: &str = "generated:load-order";
 
 pub struct Library {
     store: Store,
     root: PathBuf,
+    /// Extracted FOMOD archives waiting for the user's choices, by token.
+    pending: HashMap<String, PendingFomod>,
+}
+
+struct PendingFomod {
+    game_id: String,
+    scratch: PathBuf,
+    content_root: PathBuf,
+    installer: fomod::FomodInstaller,
+    meta: ModMeta,
+    archive_name: Option<String>,
+    instance_id: Option<String>,
+}
+
+pub enum Prepared {
+    Installed(InstallOutcome),
+    NeedsChoices(FomodRequest),
+}
+
+/// A FOMOD installer waiting for the user's choices.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct FomodRequest {
+    pub token: String,
+    pub game_id: String,
+    pub mod_name: String,
+    pub installer: fomod::FomodInstaller,
+    pub defaults: fomod::Selections,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct FomodState {
+    pub visible_steps: Vec<u32>,
+    /// `[step][group][option]`: an option's kind can change with earlier choices.
+    pub option_kinds: Vec<Vec<Vec<fomod::OptionKind>>>,
+    /// Why the choices can't be installed yet, if they can't.
+    pub error: Option<String>,
 }
 
 impl Library {
@@ -154,6 +231,7 @@ impl Library {
         let library = Self {
             store,
             root: root.to_path_buf(),
+            pending: HashMap::new(),
         };
         library.clean_tmp();
         Ok(library)
@@ -195,36 +273,203 @@ impl Library {
         &mut self,
         game: &GameDefinition,
         archive_path: &Path,
-        mut meta: ModMeta,
+        meta: ModMeta,
         instance_id: Option<&str>,
     ) -> Result<InstallOutcome> {
-        let scratch = self.root.join("tmp").join(uuid::Uuid::new_v4().to_string());
+        // Without someone to ask, FOMOD installers get their default options.
+        match self.prepare_archive(game, archive_path, meta, instance_id)? {
+            Prepared::Installed(outcome) => Ok(outcome),
+            Prepared::NeedsChoices(request) => {
+                let mut outcome = self.finish_fomod(game, &request.token, &request.defaults)?;
+                outcome
+                    .warnings
+                    .push("This mod has installer options; the default ones were used.".into());
+                Ok(outcome)
+            }
+        }
+    }
+
+    /// Extracts an archive and installs it, unless it has a FOMOD installer:
+    /// then the extracted files are kept and the installer is returned so the
+    /// user can choose options (`finish_fomod` or `cancel_fomod`).
+    pub fn prepare_archive(
+        &mut self,
+        game: &GameDefinition,
+        archive_path: &Path,
+        mut meta: ModMeta,
+        instance_id: Option<&str>,
+    ) -> Result<Prepared> {
+        let token = uuid::Uuid::new_v4().to_string();
+        let scratch = self.root.join("tmp").join(&token);
+        let archive_name = archive_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
+        if let Some(parsed) = archive_name.as_deref().map(parse_archive_name) {
+            meta.name = meta.name.or(Some(parsed.name));
+            meta.version = meta.version.or(parsed.version);
+            meta.nexus_mod_id = meta.nexus_mod_id.or(parsed.nexus_mod_id);
+        }
         let result = (|| {
             archive::extract(archive_path, &scratch)?;
-            let archive_name = archive_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned());
-            if let Some(parsed) = archive_name.as_deref().map(parse_archive_name) {
-                meta.name = meta.name.or(Some(parsed.name));
-                meta.version = meta.version.or(parsed.version);
-                meta.nexus_mod_id = meta.nexus_mod_id.or(parsed.nexus_mod_id);
+            if let Some((installer, content_root)) = fomod::find_installer(&scratch)? {
+                let request = FomodRequest {
+                    token: token.clone(),
+                    game_id: game.id.clone(),
+                    mod_name: meta
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| installer.module_name.clone()),
+                    defaults: fomod::default_selections(&installer),
+                    installer: installer.clone(),
+                };
+                self.pending.insert(
+                    token.clone(),
+                    PendingFomod {
+                        game_id: game.id.clone(),
+                        scratch: scratch.clone(),
+                        content_root,
+                        installer,
+                        meta: meta.clone(),
+                        archive_name: archive_name.clone(),
+                        instance_id: instance_id.map(String::from),
+                    },
+                );
+                return Ok(Prepared::NeedsChoices(request));
             }
-            self.install_from_dir(game, &scratch, meta, archive_name, instance_id)
+            let name = meta.name.clone().unwrap_or_else(|| "Unnamed mod".into());
+            let plan = installer::plan_install(game, &scratch, &name)?;
+            self.install_from_dir(
+                game,
+                &scratch,
+                plan,
+                meta.clone(),
+                archive_name.clone(),
+                instance_id,
+            )
+            .map(Prepared::Installed)
         })();
-        let _ = fs::remove_dir_all(&scratch);
+        if !matches!(result, Ok(Prepared::NeedsChoices(_))) {
+            let _ = fs::remove_dir_all(&scratch);
+        }
         result
+    }
+
+    /// Where the installer stands with these choices: which steps show, what
+    /// each option currently is, and whether the choices are complete.
+    pub fn fomod_state(&self, token: &str, selections: &fomod::Selections) -> Result<FomodState> {
+        let pending = self.pending_fomod(token)?;
+        Ok(FomodState {
+            visible_steps: fomod::visible_steps(&pending.installer, selections)
+                .into_iter()
+                .map(|s| s as u32)
+                .collect(),
+            option_kinds: fomod::option_kinds(&pending.installer, selections),
+            error: fomod::validate(&pending.installer, selections).err(),
+        })
+    }
+
+    /// An image shipped with a FOMOD installer, for showing an option.
+    pub fn fomod_image(&self, token: &str, relative: &str) -> Result<Vec<u8>> {
+        let pending = self.pending_fomod(token)?;
+        if relative.split(['/', '\\']).any(|p| p == "..") {
+            return Err(Error::NotFound(relative.into()));
+        }
+        let path = resolve_case_insensitive(&pending.content_root, relative)
+            .ok_or_else(|| Error::NotFound(relative.into()))?;
+        fs::read(&path).map_err(|e| Error::io(&path, e))
+    }
+
+    /// Installs a FOMOD mod with the chosen options.
+    pub fn finish_fomod(
+        &mut self,
+        game: &GameDefinition,
+        token: &str,
+        selections: &fomod::Selections,
+    ) -> Result<InstallOutcome> {
+        let pending = self.pending_fomod(token)?;
+        fomod::validate(&pending.installer, selections).map_err(Error::Install)?;
+        let mappings = fomod::resolve(&pending.installer, selections);
+        let pairs = fomod::expand(&pending.content_root, &mappings);
+        if pairs.is_empty() {
+            return Err(Error::Install(
+                "The chosen options don't install any files.".into(),
+            ));
+        }
+        let prefix = pending
+            .content_root
+            .strip_prefix(&pending.scratch)
+            .unwrap_or(Path::new(""))
+            .components()
+            .map(|c| format!("{}/", c.as_os_str().to_string_lossy()))
+            .collect::<String>();
+        let files: Vec<installer::PlannedFile> = pairs
+            .into_iter()
+            .map(|(source, target)| installer::PlannedFile {
+                source: format!("{prefix}{source}"),
+                target: installer::normalize_target(game, &target),
+            })
+            .collect();
+        let kinds: std::collections::BTreeSet<String> = files
+            .iter()
+            .filter_map(|f| game.layout_for(&f.target).map(|t| t.kind.clone()))
+            .collect();
+        let plan = InstallPlan {
+            files,
+            skipped: Vec::new(),
+            kinds: kinds.into_iter().collect(),
+            warnings: Vec::new(),
+        };
+        let pending = self.pending.remove(token).expect("checked above");
+        let result = self.install_from_dir(
+            game,
+            &pending.scratch,
+            plan,
+            pending.meta,
+            pending.archive_name,
+            pending.instance_id.as_deref(),
+        );
+        let _ = fs::remove_dir_all(&pending.scratch);
+        result
+    }
+
+    /// A waiting installer again, e.g. when the user comes back to it.
+    pub fn fomod_request(&self, token: &str) -> Result<FomodRequest> {
+        let pending = self.pending_fomod(token)?;
+        Ok(FomodRequest {
+            token: token.to_string(),
+            game_id: pending.game_id.clone(),
+            mod_name: pending
+                .meta
+                .name
+                .clone()
+                .unwrap_or_else(|| pending.installer.module_name.clone()),
+            defaults: fomod::default_selections(&pending.installer),
+            installer: pending.installer.clone(),
+        })
+    }
+
+    pub fn cancel_fomod(&mut self, token: &str) {
+        if let Some(pending) = self.pending.remove(token) {
+            let _ = fs::remove_dir_all(pending.scratch);
+        }
+    }
+
+    fn pending_fomod(&self, token: &str) -> Result<&PendingFomod> {
+        self.pending
+            .get(token)
+            .ok_or_else(|| Error::NotFound("this installer (it may have been cancelled)".into()))
     }
 
     fn install_from_dir(
         &mut self,
         game: &GameDefinition,
         extracted: &Path,
+        plan: InstallPlan,
         meta: ModMeta,
         archive_name: Option<String>,
         instance_id: Option<&str>,
     ) -> Result<InstallOutcome> {
         let name = meta.name.clone().unwrap_or_else(|| "Unnamed mod".into());
-        let plan: InstallPlan = installer::plan_install(game, extracted, &name)?;
 
         // Same Nexus file installed again, or an explicit update: replace it.
         let existing = match &meta.replaces {
@@ -891,6 +1136,180 @@ impl Library {
         health::tail(&path, max_lines).map_err(|e| Error::io(&path, e))
     }
 
+    // Save backups
+
+    fn save_backup_dir(&self, instance_id: &str) -> PathBuf {
+        self.root.join("save-backups").join(instance_id)
+    }
+
+    /// The game's save folder in this environment, if it exists.
+    pub fn save_dir(&self, game: &GameDefinition, env: &Environment) -> Option<PathBuf> {
+        saves::find_save_dir(env, game.saves.as_deref()?)
+    }
+
+    pub fn save_backups(&self, instance_id: &str) -> Vec<saves::SaveBackup> {
+        saves::list(&self.save_backup_dir(instance_id))
+    }
+
+    pub fn backup_saves(
+        &self,
+        game: &GameDefinition,
+        env: &Environment,
+        instance_id: &str,
+        reason: saves::BackupReason,
+    ) -> Result<Option<saves::SaveBackup>> {
+        let Some(dir) = self.save_dir(game, env) else {
+            return Ok(None);
+        };
+        let backups = self.save_backup_dir(instance_id);
+        match reason {
+            saves::BackupReason::BeforeLaunch => saves::auto_backup(&dir, &backups, now()),
+            _ => saves::create(&dir, &backups, reason, now()),
+        }
+    }
+
+    pub fn restore_saves(
+        &self,
+        game: &GameDefinition,
+        env: &Environment,
+        instance_id: &str,
+        backup_id: &str,
+    ) -> Result<()> {
+        let dir = self
+            .save_dir(game, env)
+            .ok_or_else(|| Error::NotFound("the game's save folder".into()))?;
+        saves::restore(&dir, &self.save_backup_dir(instance_id), backup_id, now())
+    }
+
+    pub fn delete_save_backup(&self, instance_id: &str, backup_id: &str) -> Result<()> {
+        saves::delete(&self.save_backup_dir(instance_id), backup_id)
+    }
+
+    /// Whether saves are backed up before each launch (on unless turned off).
+    pub fn auto_save_backup(&self, instance_id: &str) -> bool {
+        !matches!(self.store.setting(&format!("auto_save_backup:{instance_id}")), Ok(Some(v)) if v == "off")
+    }
+
+    pub fn set_auto_save_backup(&self, instance_id: &str, on: bool) -> Result<()> {
+        self.store.set_setting(
+            &format!("auto_save_backup:{instance_id}"),
+            (!on).then_some("off"),
+        )
+    }
+
+    // Profile sharing
+
+    /// A profile as a portable list: mods in load order with enough Nexus
+    /// details to find them again on another machine.
+    pub fn export_profile(
+        &mut self,
+        game: &GameDefinition,
+        instance_id: &str,
+        profile_id: &str,
+    ) -> Result<ProfileExport> {
+        let profile = self
+            .store
+            .profiles(instance_id)?
+            .into_iter()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| Error::NotFound(format!("profile {profile_id}")))?;
+        let mods: HashMap<String, ModRecord> = self
+            .store
+            .mods_for_game(&game.id)?
+            .into_iter()
+            .map(|m| (m.id.clone(), m))
+            .collect();
+        let entries = self
+            .effective_entries(&game.id, profile_id)?
+            .into_iter()
+            .filter_map(|e| {
+                let m = mods.get(&e.mod_id)?;
+                Some(ExportedMod {
+                    name: m.name.clone(),
+                    version: m.version.clone(),
+                    enabled: e.enabled,
+                    nexus_mod_id: m.nexus_mod_id,
+                    nexus_file_id: m.nexus_file_id,
+                })
+            })
+            .collect();
+        Ok(ProfileExport {
+            format: PROFILE_FORMAT.into(),
+            version: 1,
+            game_id: game.id.clone(),
+            name: profile.name,
+            exported_at: now(),
+            mods: entries,
+        })
+    }
+
+    /// Creates a profile from an export, matching mods in this library by
+    /// Nexus file, then Nexus mod, then name. Mods that aren't installed are
+    /// reported so they can be downloaded.
+    pub fn import_profile(
+        &mut self,
+        game: &GameDefinition,
+        instance_id: &str,
+        export: &ProfileExport,
+    ) -> Result<ImportReport> {
+        if export.format != PROFILE_FORMAT {
+            return Err(Error::Install(
+                "This file isn't a Mod Manager profile.".into(),
+            ));
+        }
+        if export.game_id != game.id {
+            return Err(Error::Install(format!(
+                "This profile is for another game ({}).",
+                export.game_id
+            )));
+        }
+        let installed = self.store.mods_for_game(&game.id)?;
+        let mut used = std::collections::HashSet::new();
+        let mut entries = Vec::new();
+        let mut missing = Vec::new();
+        for wanted in &export.mods {
+            let found = installed
+                .iter()
+                .filter(|m| !used.contains(&m.id))
+                .find(|m| wanted.nexus_file_id.is_some() && m.nexus_file_id == wanted.nexus_file_id)
+                .or_else(|| {
+                    installed
+                        .iter()
+                        .filter(|m| !used.contains(&m.id))
+                        .find(|m| {
+                            wanted.nexus_mod_id.is_some() && m.nexus_mod_id == wanted.nexus_mod_id
+                        })
+                })
+                .or_else(|| {
+                    installed
+                        .iter()
+                        .filter(|m| !used.contains(&m.id))
+                        .find(|m| m.name.eq_ignore_ascii_case(&wanted.name))
+                });
+            match found {
+                Some(m) => {
+                    used.insert(m.id.clone());
+                    entries.push(ProfileEntry {
+                        mod_id: m.id.clone(),
+                        enabled: wanted.enabled,
+                        priority: 0,
+                    });
+                }
+                None if wanted.enabled => missing.push(wanted.clone()),
+                None => {}
+            }
+        }
+        let name = format!("{} (imported)", export.name);
+        let profile = self.create_profile(instance_id, &name, None)?;
+        self.save_entries(&profile.id, entries)?;
+        Ok(ImportReport {
+            profile_id: profile.id,
+            profile_name: name,
+            matched: used.len() as u32,
+            missing,
+        })
+    }
+
     /// Total size of the library's mod folders, in bytes.
     pub fn disk_usage(&self) -> u64 {
         WalkDir::new(self.root.join("mods"))
@@ -961,6 +1380,8 @@ mod tests {
                 version: None,
                 build_id: None,
                 fingerprint: "test".into(),
+                launch_id: None,
+                launch_options_hint: None,
                 dll_overrides: vec![],
             },
             archives,
@@ -1105,6 +1526,106 @@ mod tests {
         fs::write(&scc, "x").unwrap();
         let loadout = f.lib.loadout(&f.game, &f.instance).unwrap();
         assert!(loadout.mods[0].missing_requirements.is_empty());
+    }
+
+    #[test]
+    fn exports_and_imports_profiles() {
+        let mut f = fixture();
+        let id = f.instance.id.clone();
+        let a = zip(&f, "a.zip", &[("a.archive", "A")]);
+        let b = zip(&f, "b.zip", &[("b.archive", "B")]);
+        let meta = ModMeta {
+            nexus_mod_id: Some(5),
+            nexus_file_id: Some(50),
+            ..Default::default()
+        };
+        let a = f.lib.install_archive(&f.game, &a, meta, Some(&id)).unwrap();
+        f.lib
+            .install_archive(&f.game, &b, ModMeta::default(), Some(&id))
+            .unwrap();
+        let profile = f.lib.ensure_active_profile(&id).unwrap();
+
+        let mut export = f.lib.export_profile(&f.game, &id, &profile).unwrap();
+        assert_eq!(export.mods.len(), 2);
+        // Round-trips through JSON, and reports what isn't installed here.
+        export.mods.reverse();
+        export.mods.push(ExportedMod {
+            name: "Elsewhere".into(),
+            version: None,
+            enabled: true,
+            nexus_mod_id: Some(9),
+            nexus_file_id: Some(90),
+        });
+        let json = serde_json::to_string(&export).unwrap();
+        let parsed: ProfileExport = serde_json::from_str(&json).unwrap();
+        let report = f.lib.import_profile(&f.game, &id, &parsed).unwrap();
+        assert_eq!(report.matched, 2);
+        assert_eq!(report.missing[0].name, "Elsewhere");
+
+        let loadout = f.lib.loadout(&f.game, &f.instance).unwrap();
+        assert_eq!(loadout.active_profile_id, report.profile_id);
+        assert_eq!(
+            loadout.mods.last().unwrap().record.id,
+            a.record.id,
+            "order follows the file"
+        );
+    }
+
+    #[test]
+    fn fomod_archives_wait_for_choices() {
+        let mut f = fixture();
+        let id = f.instance.id.clone();
+        let config = r#"<config><moduleName>Pick</moduleName><installSteps><installStep name="S">
+            <optionalFileGroups><group name="G" type="SelectExactlyOne"><plugins>
+              <plugin name="A"><description/><files><file source="a.archive" destination="archive/pc/mod/a.archive"/></files><typeDescriptor><type name="Optional"/></typeDescriptor></plugin>
+              <plugin name="B"><description/><files><file source="b.archive" destination="archive/pc/mod/b.archive"/></files><typeDescriptor><type name="Optional"/></typeDescriptor></plugin>
+            </plugins></group></optionalFileGroups></installStep></installSteps></config>"#;
+        let archive = zip(
+            &f,
+            "Pick.zip",
+            &[
+                ("fomod/ModuleConfig.xml", config),
+                ("a.archive", "A"),
+                ("b.archive", "B"),
+            ],
+        );
+        let Prepared::NeedsChoices(request) = f
+            .lib
+            .prepare_archive(&f.game, &archive, ModMeta::default(), Some(&id))
+            .unwrap()
+        else {
+            panic!("expected the installer to ask");
+        };
+        let choose_b = fomod::Selections(vec![vec![vec![1]]]);
+        assert!(
+            f.lib
+                .fomod_state(&request.token, &choose_b)
+                .unwrap()
+                .error
+                .is_none()
+        );
+        let outcome = f
+            .lib
+            .finish_fomod(&f.game, &request.token, &choose_b)
+            .unwrap();
+        assert_eq!(
+            f.lib.mod_files(&outcome.record.id).unwrap(),
+            ["archive/pc/mod/b.archive"]
+        );
+        assert!(
+            f.lib.fomod_state(&request.token, &choose_b).is_err(),
+            "finished installers are gone"
+        );
+
+        // Without a UI, defaults are used.
+        let outcome = f
+            .lib
+            .install_archive(&f.game, &archive, ModMeta::default(), Some(&id))
+            .unwrap();
+        assert_eq!(
+            f.lib.mod_files(&outcome.record.id).unwrap(),
+            ["archive/pc/mod/a.archive"]
+        );
     }
 
     #[test]

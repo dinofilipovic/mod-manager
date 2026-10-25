@@ -31,6 +31,8 @@ const scan: ScanResult = {
       version: "2.5",
       build_id: "26161058",
       fingerprint: "demo",
+      launch_id: null,
+      launch_options_hint: null,
       dll_overrides: [
         { dll: "version", required: "native,builtin", current: null, satisfied: false, reason: "Cyber Engine Tweaks loads through version.dll" },
         { dll: "winmm", required: "native,builtin", current: null, satisfied: false, reason: "RED4ext loads through winmm.dll" },
@@ -54,6 +56,52 @@ const game: GameDefinition = {
   requirements: [],
   logs: [],
   load_order: { file: "archive/pc/mod/modlist.txt", extensions: ["archive"] },
+  saves: "C:\\users\\*\\Saved Games\\CD Projekt Red\\Cyberpunk 2077",
+};
+
+const fomodRequest = {
+  token: "demo-fomod",
+  game_id: "cyberpunk2077",
+  mod_name: "Better Lighting",
+  defaults: [[[0], []]],
+  installer: {
+    module_name: "Better Lighting",
+    image: null,
+    info: { name: "Better Lighting", author: "Lumen", version: "2.1", website: null, description: "Nicer lights in Night City." },
+    steps: [
+      {
+        name: "Preset",
+        groups: [
+          {
+            name: "Brightness",
+            kind: "SelectExactlyOne" as const,
+            options: [
+              { name: "Balanced", description: "Close to the original look, slightly brighter nights.", image: null, kind: "Recommended" as const },
+              { name: "Vivid", description: "Stronger neon and more contrast.", image: null, kind: "Optional" as const },
+            ],
+          },
+          {
+            name: "Extras",
+            kind: "SelectAny" as const,
+            options: [
+              { name: "Brighter interiors", description: "Raises indoor light levels.", image: null, kind: "Optional" as const },
+              { name: "Ray tracing tweaks", description: "Needs RT enabled.", image: null, kind: "NotUsable" as const },
+            ],
+          },
+        ],
+      },
+      {
+        name: "Compatibility",
+        groups: [
+          {
+            name: "Weather mods",
+            kind: "SelectAtMostOne" as const,
+            options: [{ name: "Nova LUT patch", description: "Only if you use Nova LUT.", image: null, kind: "Optional" as const }],
+          },
+        ],
+      },
+    ],
+  },
 };
 
 function mod(id: string, name: string, kinds: string[], extra: Partial<ModRecord> = {}): ModRecord {
@@ -197,6 +245,35 @@ export function installDevMock() {
               entries: [],
             },
           ];
+        case "plugin:dialog|open":
+          return ["/demo/Better Lighting.zip"];
+        case "import_archives":
+          return [{ file: "Better Lighting.zip", outcome: null, fomod: fomodRequest, error: null }];
+        case "get_fomod":
+          return fomodRequest;
+        case "fomod_state":
+          return { visible_steps: [0, 1], option_kinds: [[["Recommended", "Optional"], ["Optional", "NotUsable"]], [["Optional"]]], error: null };
+        case "finish_fomod":
+          return { mod: mods[0].mod, skipped: [], warnings: [], replaced_existing: false };
+        case "saves_info":
+          return {
+            save_dir: "/demo/Saved Games/CD Projekt Red/Cyberpunk 2077",
+            auto_backup: true,
+            backups: [
+              { id: "b2", created_at: now - 1800, reason: "BeforeLaunch", size_bytes: 120_000_000 },
+              { id: "b1", created_at: now - 86400 * 2, reason: "Manual", size_bytes: 98_000_000 },
+            ],
+          };
+        case "open_collection":
+          return {
+            slug: "demo", name: "Night City Essentials", author: "Curator", summary: "A small, stable starter set.", revision: 12,
+            game_domain: "cyberpunk2077", unavailable_file_ids: [],
+            mods: [
+              { mod_id: 107, file_id: 1, name: "Cyber Engine Tweaks", file_title: "CET 1.38.0", file_name: null, version: "1.38.0", size_bytes: 12_000_000, optional: false, game_domain: "cyberpunk2077" },
+              { mod_id: 1511, file_id: 77, name: "redscript", file_title: "redscript", file_name: null, version: "0.5.27", size_bytes: 3_000_000, optional: false, game_domain: "cyberpunk2077" },
+              { mod_id: 4198, file_id: 88, name: "ArchiveXL", file_title: "ArchiveXL", file_name: null, version: "1.21", size_bytes: 1_000_000, optional: true, game_domain: "cyberpunk2077" },
+            ],
+          };
         case "read_log":
           return ["[info] CET version 1.38.0", "[info] Game version 2.5", "[error] [ImmersiveHUD] init.lua:12: attempt to index a nil value"];
         case "launch_game":

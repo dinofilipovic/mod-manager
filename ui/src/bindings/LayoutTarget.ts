@@ -13,6 +13,11 @@ extensions: Array<string>,
  */
 marker_file: string | null, 
 /**
+ * A folder name whose parent folder is one mod of this kind (e.g.
+ * `content` for The Witcher 3's `modFoo/content/...`).
+ */
+marker_folder: string | null, 
+/**
  * Put matching files directly in `path`, dropping their folders.
  */
 flatten: boolean, 

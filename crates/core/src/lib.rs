@@ -3,10 +3,12 @@
 //! and shared by the CLI and the desktop app.
 
 pub mod archive;
+pub mod collections;
 pub mod deploy;
 pub mod detect;
 pub mod env;
 pub mod error;
+pub mod fomod;
 pub mod fs_util;
 pub mod game;
 pub mod health;
@@ -15,6 +17,7 @@ pub mod library;
 pub mod nexus;
 mod registry;
 pub mod requirements;
+pub mod saves;
 pub mod store;
 mod vdf;
 
@@ -36,7 +39,11 @@ pub struct ScanResult {
 
 /// Discovers all environments on this machine and detects the given games in them.
 pub fn scan(games: &[GameDefinition]) -> ScanResult {
-    scan_environments(games, env::discover())
+    let steam_ids: Vec<String> = games
+        .iter()
+        .filter_map(|g| g.stores.steam_app_id.clone())
+        .collect();
+    scan_environments(games, env::discover(&steam_ids))
 }
 
 /// Detects the given games in an already discovered set of environments.

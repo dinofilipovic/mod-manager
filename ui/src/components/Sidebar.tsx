@@ -12,6 +12,7 @@ export function Sidebar({
   onRescan,
   activeDownloads,
   nexus,
+  updateAvailable,
 }: {
   scan: ScanResult | null;
   scanning: boolean;
@@ -20,6 +21,7 @@ export function Sidebar({
   onRescan: () => void;
   activeDownloads: number;
   nexus: NexusStatus | null;
+  updateAvailable: string | null;
 }) {
   const envName = (id: string) => scan?.environments.find((e) => e.id === id)?.name ?? id;
   return (
@@ -71,6 +73,13 @@ export function Sidebar({
           {activeDownloads > 0 && <span className="count">{activeDownloads}</span>}
         </button>
         <button
+          className={`nav-item${view?.kind === "collections" ? " active" : ""}`}
+          onClick={() => onNavigate({ kind: "collections" })}
+        >
+          <Icon name="layers" />
+          <span className="nav-text">Collections</span>
+        </button>
+        <button
           className={`nav-item${view?.kind === "settings" ? " active" : ""}`}
           onClick={() => onNavigate({ kind: "settings" })}
         >
@@ -79,6 +88,11 @@ export function Sidebar({
         </button>
       </div>
 
+      {updateAvailable && (
+        <button className="update-pill" onClick={() => onNavigate({ kind: "settings" })}>
+          <Icon name="sparkle" size={14} /> Update to {updateAvailable}
+        </button>
+      )}
       <button className="account" onClick={() => onNavigate({ kind: "settings" })}>
         <span className={`avatar${nexus?.user ? " connected" : ""}`}>
           {nexus?.user ? nexus.user.name.slice(0, 1).toUpperCase() : <Icon name="user" size={14} />}

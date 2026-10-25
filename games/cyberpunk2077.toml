@@ -27,6 +27,9 @@ canonical_dirs = [
 # from the game root and installed as-is.
 root_markers = ["archive", "bin", "r6", "red4ext", "mods", "engine", "tools"]
 
+# Where the game keeps saves. `*` is the Windows user (`crossover` in CrossOver).
+saves = 'C:\users\*\Saved Games\CD Projekt Red\Cyberpunk 2077'
+
 # Top-level keys must come before the first [table] below, or TOML puts them
 # inside that table.
 [stores]

@@ -10,6 +10,7 @@ rust-version.workspace = true
 tauri-build.workspace = true
 
 [dependencies]
+base64 = "0.23.1"
 mm-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -17,7 +18,9 @@ tauri.workspace = true
 tauri-plugin-deep-link = "2.6.2"
 tauri-plugin-dialog = "2.8.3"
 tauri-plugin-opener = "2"
+tauri-plugin-process = "2.4.0"
 tauri-plugin-single-instance = { version = "2.5.4", features = ["deep-link"] }
+tauri-plugin-updater = "2.14.0"
 ts-rs.workspace = true
 uuid = { version = "1.29.0", features = ["v4"] }
 

@@ -1,11 +1,13 @@
-//! Environments are the places a Windows game can run: CrossOver bottles and
-//! plain Wine prefixes today; native Windows and Proton prefixes later.
+//! Environments are the places a Windows game can run: CrossOver bottles,
+//! plain Wine prefixes, Steam Proton prefixes, and Windows itself.
 //!
-//! All of them share the Wine prefix layout (`drive_c`, `dosdevices`,
+//! The Wine-based ones share the prefix layout (`drive_c`, `dosdevices`,
 //! `system.reg`, `user.reg`), so path and registry handling lives here and the
 //! submodules only know how to find them and read their metadata.
 
 pub mod crossover;
+pub mod native;
+pub mod proton;
 pub mod runner;
 pub mod wine;
 
@@ -41,6 +43,13 @@ pub enum EnvironmentKind {
         crossover_version: Option<String>,
     },
     WinePrefix,
+    /// A Steam Proton prefix; the game lives in a Linux Steam library.
+    Proton {
+        app_id: String,
+        steam_root: PathBuf,
+    },
+    /// Windows itself.
+    Native,
 }
 
 /// Registry hive of a Wine prefix.
@@ -62,6 +71,9 @@ impl Environment {
     /// are matched without regard to case; if the path does not exist yet, the
     /// unresolved rest is appended as-is.
     pub fn windows_to_host(&self, windows_path: &str) -> Option<PathBuf> {
+        if matches!(self.kind, EnvironmentKind::Native) {
+            return Some(PathBuf::from(windows_path));
+        }
         let (drive, rest) = windows_path.split_once(':')?;
         if drive.len() != 1 || !drive.chars().all(|c| c.is_ascii_alphabetic()) {
             return None;
@@ -85,6 +97,9 @@ impl Environment {
 
     /// Reads the string values of a registry key, or `None` if it does not exist.
     pub fn registry_key(&self, hive: Hive, key: &str) -> Result<Option<BTreeMap<String, String>>> {
+        if matches!(self.kind, EnvironmentKind::Native) {
+            return Ok(native::registry_key(hive, key));
+        }
         let file = match hive {
             Hive::LocalMachine => "system.reg",
             Hive::CurrentUser => "user.reg",
@@ -96,8 +111,38 @@ impl Environment {
         registry::read_key(&path, key)
     }
 
+    /// Whether games here run through Wine (everything but Windows itself).
+    pub fn is_wine(&self) -> bool {
+        !matches!(self.kind, EnvironmentKind::Native)
+    }
+
+    /// Steam installs that can hold this environment's games.
+    pub fn steam_roots(&self) -> Vec<PathBuf> {
+        match &self.kind {
+            EnvironmentKind::Proton { steam_root, .. } => vec![steam_root.clone()],
+            _ => [r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"]
+                .iter()
+                .filter_map(|p| self.windows_to_host(p))
+                .filter(|p| p.is_dir())
+                .collect(),
+        }
+    }
+
+    /// Converts a path written by a launcher (Steam library folders, Epic
+    /// manifests) to a host path: Windows paths inside Wine, Linux paths as-is
+    /// for Proton.
+    pub fn launcher_path(&self, path: &str) -> Option<PathBuf> {
+        match self.kind {
+            EnvironmentKind::Proton { .. } => Some(PathBuf::from(path)),
+            _ => self.windows_to_host(path),
+        }
+    }
+
     /// The prefix-wide Wine DLL overrides, keyed by lowercase DLL name.
     pub fn dll_overrides(&self) -> Result<BTreeMap<String, String>> {
+        if !self.is_wine() {
+            return Ok(BTreeMap::new());
+        }
         Ok(self
             .registry_key(Hive::CurrentUser, r"Software\Wine\DllOverrides")?
             .unwrap_or_default())
@@ -109,13 +154,15 @@ pub fn is_wine_prefix(path: &Path) -> bool {
     path.join("drive_c").is_dir() && path.join("system.reg").is_file()
 }
 
-/// Finds every environment on this machine: all CrossOver bottles plus the
-/// default Wine prefix, if any.
-pub fn discover() -> Vec<Environment> {
+/// Finds every environment on this machine: CrossOver bottles, the default
+/// Wine prefix, Proton prefixes of the given Steam app ids, and Windows itself.
+pub fn discover(steam_app_ids: &[String]) -> Vec<Environment> {
     let mut environments: Vec<Environment> = crossover::default_bottle_dirs()
         .iter()
         .flat_map(|dir| crossover::discover_bottles(dir).unwrap_or_default())
         .collect();
     environments.extend(wine::discover_default_prefix());
+    environments.extend(proton::discover(steam_app_ids));
+    environments.extend(native::discover());
     environments
 }

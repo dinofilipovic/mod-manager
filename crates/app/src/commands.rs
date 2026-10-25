@@ -7,10 +7,16 @@
 
 use std::path::PathBuf;
 
+use mm_core::collections::{self, Collection};
 use mm_core::deploy::DeployReport;
+use mm_core::fomod::Selections;
 use mm_core::health::LogReport;
-use mm_core::library::{ArchiveOrder, InstallOutcome, Loadout, ModMeta};
+use mm_core::library::{
+    ArchiveOrder, FomodRequest, FomodState, ImportReport, InstallOutcome, Loadout, ModMeta,
+    Prepared, ProfileExport,
+};
 use mm_core::nexus::{self, Download, NexusClient, NexusUser};
+use mm_core::saves::{BackupReason, SaveBackup};
 use mm_core::{GameDefinition, ScanResult};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -24,7 +30,18 @@ use crate::state::{AppState, CommandResult, err, lock};
 pub struct ImportResult {
     pub file: String,
     pub outcome: Option<InstallOutcome>,
+    /// Set when the mod has installer options to choose first.
+    pub fomod: Option<FomodRequest>,
     pub error: Option<String>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct SavesInfo {
+    /// The save folder, if the game has one here.
+    pub save_dir: Option<String>,
+    pub auto_backup: bool,
+    pub backups: Vec<SaveBackup>,
 }
 
 #[derive(Serialize, TS)]
@@ -141,24 +158,32 @@ pub async fn import_archives(
                     },
                     None => (ModMeta::default(), None),
                 };
-                let installed = lock(&state.library).install_archive(
+                let prepared = lock(&state.library).prepare_archive(
                     game,
                     &PathBuf::from(&path),
                     meta,
                     Some(&instance_id),
                 );
-                match installed {
-                    Ok(mut outcome) => {
+                match prepared {
+                    Ok(Prepared::Installed(mut outcome)) => {
                         outcome.warnings.extend(lookup_note);
                         ImportResult {
                             file,
                             outcome: Some(outcome),
+                            fomod: None,
                             error: None,
                         }
                     }
+                    Ok(Prepared::NeedsChoices(request)) => ImportResult {
+                        file,
+                        outcome: None,
+                        fomod: Some(request),
+                        error: None,
+                    },
                     Err(e) => ImportResult {
                         file,
                         outcome: None,
+                        fomod: None,
                         error: Some(e.to_string()),
                     },
                 }
@@ -409,6 +434,16 @@ pub async fn fix_dll_overrides(app: AppHandle, instance_id: String) -> CommandRe
 pub async fn launch_game(app: AppHandle, instance_id: String, modded: bool) -> CommandResult<()> {
     blocking(app, move |_, state| {
         let (instance, game, env) = state.resolve(&instance_id)?;
+        let library = lock(&state.library);
+        if library.auto_save_backup(&instance.id) {
+            // A failed backup shouldn't stop the game; the Saves tab shows backups.
+            if let Err(e) =
+                library.backup_saves(game, &env, &instance.id, BackupReason::BeforeLaunch)
+            {
+                eprintln!("save backup before launch failed: {e}");
+            }
+        }
+        drop(library);
         env.launch_game(game, &instance, modded).map_err(err)
     })
     .await
@@ -575,6 +610,271 @@ pub async fn update_mod(app: AppHandle, mod_id: String) -> CommandResult<String>
                 replaces: Some(record.id),
             },
         )
+    })
+    .await
+}
+
+// Installer options (FOMOD)
+
+#[tauri::command]
+pub async fn get_fomod(app: AppHandle, token: String) -> CommandResult<FomodRequest> {
+    blocking(app, move |_, state| {
+        lock(&state.library).fomod_request(&token).map_err(err)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn fomod_state(
+    app: AppHandle,
+    token: String,
+    selections: Selections,
+) -> CommandResult<FomodState> {
+    blocking(app, move |_, state| {
+        lock(&state.library)
+            .fomod_state(&token, &selections)
+            .map_err(err)
+    })
+    .await
+}
+
+/// An installer image as a data URL, so the page can show it.
+#[tauri::command]
+pub async fn fomod_image(app: AppHandle, token: String, path: String) -> CommandResult<String> {
+    blocking(app, move |_, state| {
+        use base64::Engine;
+        let bytes = lock(&state.library)
+            .fomod_image(&token, &path)
+            .map_err(err)?;
+        let mime = match path
+            .rsplit('.')
+            .next()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("png") => "image/png",
+            Some("gif") => "image/gif",
+            Some("bmp") => "image/bmp",
+            Some("webp") => "image/webp",
+            _ => "image/jpeg",
+        };
+        Ok(format!(
+            "data:{mime};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn finish_fomod(
+    app: AppHandle,
+    token: String,
+    selections: Selections,
+) -> CommandResult<InstallOutcome> {
+    blocking(app, move |app, state| {
+        let game_id = lock(&state.library)
+            .fomod_request(&token)
+            .map_err(err)?
+            .game_id;
+        let game = state.game(&game_id)?;
+        let outcome = lock(&state.library)
+            .finish_fomod(game, &token, &selections)
+            .map_err(err)?;
+        if let Some(download) = lock(&state.fomod_downloads).remove(&token) {
+            let done = mm_core::nexus::DownloadStatus::Done {
+                mod_id: outcome.record.id.clone(),
+                replaced_existing: outcome.replaced_existing,
+                warnings: outcome.warnings.clone(),
+            };
+            downloads::update(app, &download, |d| d.status = done);
+        }
+        let _ = app.emit(LIBRARY_CHANGED, ());
+        Ok(outcome)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cancel_fomod(app: AppHandle, token: String) -> CommandResult<()> {
+    blocking(app, move |app, state| {
+        lock(&state.library).cancel_fomod(&token);
+        if let Some(download) = lock(&state.fomod_downloads).remove(&token) {
+            downloads::update(app, &download, |d| {
+                d.status = mm_core::nexus::DownloadStatus::Failed {
+                    message: "Installation cancelled.".into(),
+                }
+            });
+        }
+        Ok(())
+    })
+    .await
+}
+
+// Save backups
+
+#[tauri::command]
+pub async fn saves_info(app: AppHandle, instance_id: String) -> CommandResult<SavesInfo> {
+    blocking(app, move |_, state| {
+        let (instance, game, env) = state.resolve(&instance_id)?;
+        let library = lock(&state.library);
+        Ok(SavesInfo {
+            save_dir: library
+                .save_dir(game, &env)
+                .map(|p| p.display().to_string()),
+            auto_backup: library.auto_save_backup(&instance.id),
+            backups: library.save_backups(&instance.id),
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn backup_saves(
+    app: AppHandle,
+    instance_id: String,
+) -> CommandResult<Option<SaveBackup>> {
+    blocking(app, move |_, state| {
+        let (instance, game, env) = state.resolve(&instance_id)?;
+        lock(&state.library)
+            .backup_saves(game, &env, &instance.id, BackupReason::Manual)
+            .map_err(err)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn restore_saves(
+    app: AppHandle,
+    instance_id: String,
+    backup_id: String,
+) -> CommandResult<()> {
+    blocking(app, move |_, state| {
+        let (instance, game, env) = state.resolve(&instance_id)?;
+        lock(&state.library)
+            .restore_saves(game, &env, &instance.id, &backup_id)
+            .map_err(err)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_save_backup(
+    app: AppHandle,
+    instance_id: String,
+    backup_id: String,
+) -> CommandResult<()> {
+    blocking(app, move |_, state| {
+        lock(&state.library)
+            .delete_save_backup(&instance_id, &backup_id)
+            .map_err(err)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_auto_save_backup(
+    app: AppHandle,
+    instance_id: String,
+    on: bool,
+) -> CommandResult<()> {
+    blocking(app, move |_, state| {
+        lock(&state.library)
+            .set_auto_save_backup(&instance_id, on)
+            .map_err(err)
+    })
+    .await
+}
+
+// Profile sharing
+
+#[tauri::command]
+pub async fn export_profile(
+    app: AppHandle,
+    instance_id: String,
+    profile_id: String,
+    path: String,
+) -> CommandResult<()> {
+    blocking(app, move |_, state| {
+        let (_, game, _) = state.resolve(&instance_id)?;
+        let export = lock(&state.library)
+            .export_profile(game, &instance_id, &profile_id)
+            .map_err(err)?;
+        let json = serde_json::to_string_pretty(&export).map_err(err)?;
+        std::fs::write(&path, json).map_err(|e| format!("Couldn't save the file: {e}"))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn import_profile(
+    app: AppHandle,
+    instance_id: String,
+    path: String,
+) -> CommandResult<ImportReport> {
+    blocking(app, move |_, state| {
+        let (_, game, _) = state.resolve(&instance_id)?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("Couldn't read the file: {e}"))?;
+        let export: ProfileExport = serde_json::from_str(&text)
+            .map_err(|_| "This file isn't a Mod Manager profile.".to_string())?;
+        lock(&state.library)
+            .import_profile(game, &instance_id, &export)
+            .map_err(err)
+    })
+    .await
+}
+
+// Collections
+
+#[tauri::command]
+pub async fn open_collection(app: AppHandle, link: String) -> CommandResult<Collection> {
+    blocking(app, move |_, state| {
+        let link = collections::parse_collection_link(&link).map_err(err)?;
+        if state.game_by_nexus_domain(&link.game_domain).is_none() {
+            return Err(format!(
+                "Collections for '{}' aren't supported yet.",
+                link.game_domain
+            ));
+        }
+        let key = nexus::api_key::load().ok().flatten();
+        collections::fetch_collection(key.as_deref(), &link, env!("CARGO_PKG_VERSION")).map_err(err)
+    })
+    .await
+}
+
+/// Queues downloads for the chosen files of a collection. Downloading
+/// without visiting each mod's page needs a Premium account.
+#[tauri::command]
+pub async fn install_collection(
+    app: AppHandle,
+    game_domain: String,
+    files: Vec<(u32, u32)>,
+) -> CommandResult<u32> {
+    blocking(app, move |app, _| {
+        let key = nexus::api_key::load()
+            .map_err(err)?
+            .ok_or("Connect your Nexus Mods account in Settings first.")?;
+        let user = nexus_client(&key)?.validate().map_err(err)?;
+        if !user.is_premium {
+            return Err("Installing a whole collection at once needs Nexus Mods Premium. Use the Get buttons to download each mod from its page instead.".into());
+        }
+        let mut queued = 0;
+        for (mod_id, file_id) in files {
+            downloads::start(
+                app,
+                Request {
+                    game_domain: game_domain.clone(),
+                    mod_id,
+                    file_id,
+                    key: None,
+                    expires: None,
+                    replaces: None,
+                },
+            )?;
+            queued += 1;
+        }
+        Ok(queued)
     })
     .await
 }

@@ -20,6 +20,14 @@ build_id: string | null,
  */
 fingerprint: string, 
 /**
+ * The launcher's id for the game, e.g. Epic's app name.
+ */
+launch_id: string | null, 
+/**
+ * Steam launch options to set by hand (Proton), when the game needs any.
+ */
+launch_options_hint: string | null, 
+/**
  * State of the Wine DLL overrides the game's mod loaders need.
  */
 dll_overrides: Array<DllOverrideStatus>, };

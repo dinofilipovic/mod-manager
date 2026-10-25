@@ -1,7 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { View } from "../App";
-import { ARCHIVE_EXTENSIONS, api, errorMessage, events, nexusUrls, openExternal, pickArchives, reveal } from "../api";
+import {
+  ARCHIVE_EXTENSIONS,
+  api,
+  errorMessage,
+  events,
+  nexusUrls,
+  openExternal,
+  pickArchives,
+  pickProfileExportPath,
+  pickProfileToImport,
+  reveal,
+} from "../api";
+import type { ImportReport } from "../bindings/ImportReport";
+import { useFomodQueue } from "../components/FomodQueue";
 import type { DeployReport } from "../bindings/DeployReport";
 import type { Environment } from "../bindings/Environment";
 import type { GameDefinition } from "../bindings/GameDefinition";
@@ -9,12 +22,13 @@ import type { GameInstance } from "../bindings/GameInstance";
 import type { Loadout } from "../bindings/Loadout";
 import type { NexusStatus } from "../bindings/NexusStatus";
 import type { ScanResult } from "../bindings/ScanResult";
-import { ConfirmDialog, PromptDialog } from "../components/Dialog";
+import { ConfirmDialog, Dialog, PromptDialog } from "../components/Dialog";
 import { Icon } from "../components/Icon";
 import { useToast } from "../components/Toasts";
 import { KIND_LABELS, STORE_LABELS, plural, timeAgo } from "../format";
 import { ModDetails } from "./ModDetails";
 import { HealthView } from "./HealthView";
+import { SavesView } from "./SavesView";
 import { ModList } from "./ModList";
 
 type DialogState =
@@ -52,7 +66,9 @@ export function GameView({
   onNavigate: (view: View) => void;
 }) {
   const toast = useToast();
+  const enqueueFomod = useFomodQueue();
   const [loadout, setLoadout] = useState<Loadout | null>(null);
+  const [importReport, setImportReport] = useState<ImportReport | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [kindFilter, setKindFilter] = useState<string | null>(null);
@@ -60,7 +76,7 @@ export function GameView({
   const [dialog, setDialog] = useState<DialogState>(null);
   const [dropping, setDropping] = useState(false);
   const [copyProfile, setCopyProfile] = useState(true);
-  const [tab, setTab] = useState<"mods" | "health">("mods");
+  const [tab, setTab] = useState<"mods" | "health" | "saves">("mods");
   const [dismissedUpdate, setDismissedUpdate] = useState<string | null>(() => {
     try {
       return localStorage.getItem(`dismissed-update:${instance.id}`);
@@ -120,9 +136,10 @@ export function GameView({
               : "Apply changes to put them in the game."),
         );
       for (const f of failed) toast("error", `Couldn't install ${f.file}`, f.error ?? undefined);
+      for (const r of results) if (r.fomod) enqueueFomod(r.fomod);
       await reload();
     },
-    [id, reload, run, toast],
+    [id, reload, run, toast, enqueueFomod],
   );
 
   // Files dragged onto the window.
@@ -198,7 +215,36 @@ export function GameView({
   const activeProfile = loadout?.profiles.find((p) => p.id === loadout.active_profile_id);
   const selectedMod = mods.find((m) => m.mod.id === selected) ?? null;
   const domain = game.stores.nexus_domain;
-  const envLabel = env.kind.type === "CrossOverBottle" ? `CrossOver · ${env.name}` : `Wine · ${env.name}`;
+  const envLabel =
+    env.kind.type === "CrossOverBottle"
+      ? `CrossOver · ${env.name}`
+      : env.kind.type === "Proton"
+        ? "Steam Proton"
+        : env.kind.type === "Native"
+          ? "Windows"
+          : `Wine · ${env.name}`;
+
+  const exportProfile = async () => {
+    if (!loadout || !activeProfile) return;
+    const path = await pickProfileExportPath(`${game.name} - ${activeProfile.name}`);
+    if (!path) return;
+    const ok = await run("Exporting profile", async () => {
+      await api.exportProfile(id, activeProfile.id, path);
+      return true;
+    });
+    if (ok) toast("success", "Profile exported", "Share the file or import it on another computer.");
+  };
+
+  const importProfile = async () => {
+    const path = await pickProfileToImport();
+    if (!path) return;
+    const report = await run("Importing profile", () => api.importProfile(id, path));
+    if (report) {
+      await reload();
+      if (report.missing.length) setImportReport(report);
+      else toast("success", `Imported “${report.profile_name}”`, `${report.matched} mods matched. Apply to use it.`);
+    }
+  };
 
   return (
     <div className={`game-view${selectedMod ? " with-details" : ""}`}>
@@ -280,6 +326,30 @@ export function GameView({
           </section>
         )}
 
+        {instance.launch_options_hint && (
+          <section className="setup" aria-label="Steam launch options">
+            <div className="setup-item">
+              <Icon name="alert" className="warn-icon" />
+              <div>
+                <strong>Set these Steam launch options once</strong>
+                <p>
+                  Proton reads Wine settings from the game's launch options. In Steam: right-click {game.name} →
+                  Properties → Launch Options, and paste:
+                </p>
+                <code className="copyable">{instance.launch_options_hint}</code>
+              </div>
+              <button
+                onClick={async () => {
+                  await navigator.clipboard.writeText(instance.launch_options_hint!);
+                  toast("success", "Copied", "Paste it into the game's launch options in Steam.");
+                }}
+              >
+                Copy
+              </button>
+            </div>
+          </section>
+        )}
+
         {modsMissing.length > 0 && (
           <section className="setup" aria-label="Missing requirements">
             <div className="setup-item setup-bad">
@@ -341,9 +411,14 @@ export function GameView({
             Health
             {healthIssues > 0 && <span className="tab-count bad">{healthIssues}</span>}
           </button>
+          <button role="tab" aria-selected={tab === "saves"} className={tab === "saves" ? "active" : ""} onClick={() => setTab("saves")}>
+            Saves
+          </button>
         </div>
 
-        {tab === "health" ? (
+        {tab === "saves" ? (
+          <SavesView instanceId={id} gameName={game.name} />
+        ) : tab === "health" ? (
           loadout && (
             <HealthView
               instanceId={id}
@@ -383,6 +458,8 @@ export function GameView({
                   <Icon name="plus" /> New profile
                 </button>
                 <button onClick={() => setDialog({ kind: "rename-profile" })}>Rename “{activeProfile?.name}”</button>
+                <button onClick={exportProfile}>Export to a file…</button>
+                <button onClick={importProfile}>Import from a file…</button>
                 <button
                   className="danger-text"
                   disabled={(loadout?.profiles.length ?? 0) <= 1}
@@ -556,6 +633,39 @@ export function GameView({
       )}
 
       {busy === "Installing" && <div className="busy-overlay">Installing…</div>}
+
+      {importReport && (
+        <Dialog
+          title={`Imported “${importReport.profile_name}”`}
+          onClose={() => setImportReport(null)}
+          actions={
+            <button className="primary" onClick={() => setImportReport(null)}>
+              Done
+            </button>
+          }
+        >
+          <p>
+            {importReport.matched} mods matched your library. These {importReport.missing.length} aren't installed yet:
+          </p>
+          <ul className="missing-mods">
+            {importReport.missing.map((m) => (
+              <li key={`${m.name}-${m.nexus_file_id}`}>
+                <span>
+                  {m.name} {m.version && <span className="muted small">{m.version}</span>}
+                </span>
+                {domain && m.nexus_mod_id ? (
+                  <button onClick={() => openExternal(nexusUrls.filesPage(domain, m.nexus_mod_id!, m.nexus_file_id))}>
+                    <Icon name="external" /> Get
+                  </button>
+                ) : (
+                  <span className="muted small">Not from Nexus</span>
+                )}
+              </li>
+            ))}
+          </ul>
+          <p className="muted small">Install them, then apply the profile.</p>
+        </Dialog>
+      )}
 
       {dialog?.kind === "new-profile" && (
         <PromptDialog

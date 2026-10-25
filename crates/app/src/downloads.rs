@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use mm_core::installer::sanitize_folder_name;
-use mm_core::library::ModMeta;
+use mm_core::library::{ModMeta, Prepared};
 use mm_core::nexus::{self, Download, DownloadStatus, NexusClient};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -12,6 +12,8 @@ use crate::state::{AppState, CommandResult, err, lock};
 
 pub const DOWNLOADS_CHANGED: &str = "downloads-changed";
 pub const LIBRARY_CHANGED: &str = "library-changed";
+/// A download has installer options to choose; carries the `FomodRequest`.
+pub const FOMOD_REQUESTED: &str = "fomod-requested";
 
 /// What to fetch: from an `nxm://` link, or a file a premium account may
 /// download directly (updates).
@@ -166,19 +168,28 @@ fn run(
         nexus_file_id: Some(request.file_id),
         replaces,
     };
-    let outcome = library
-        .install_archive(game, &dest, meta, instance_id.as_deref())
-        .map_err(err)?;
-    // The archive is no longer needed once unpacked into the library.
+    let prepared = library
+        .prepare_archive(game, &dest, meta, instance_id.as_deref())
+        .map_err(err);
+    // The archive is no longer needed once unpacked.
     let _ = std::fs::remove_file(&dest);
-    Ok(DownloadStatus::Done {
-        mod_id: outcome.record.id,
-        replaced_existing: outcome.replaced_existing,
-        warnings: outcome.warnings,
-    })
+    match prepared? {
+        Prepared::Installed(outcome) => Ok(DownloadStatus::Done {
+            mod_id: outcome.record.id,
+            replaced_existing: outcome.replaced_existing,
+            warnings: outcome.warnings,
+        }),
+        Prepared::NeedsChoices(request) => {
+            lock(&state.fomod_downloads).insert(request.token.clone(), id.to_string());
+            let _ = app.emit(FOMOD_REQUESTED, request.clone());
+            Ok(DownloadStatus::AwaitingChoices {
+                token: request.token,
+            })
+        }
+    }
 }
 
-fn update(app: &AppHandle, id: &str, change: impl FnOnce(&mut Download)) {
+pub fn update(app: &AppHandle, id: &str, change: impl FnOnce(&mut Download)) {
     let state = app.state::<AppState>();
     if let Some(d) = lock(&state.downloads).iter_mut().find(|d| d.id == id) {
         change(d);

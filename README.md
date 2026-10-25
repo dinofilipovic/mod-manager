@@ -1,12 +1,13 @@
 # Mod Manager
 
 A cross-platform mod manager for Windows games, wherever they run: in
-**CrossOver bottles on macOS**, in **Wine prefixes on Linux**, and (planned) on
-native Windows. It installs mods from archives or straight from Nexus Mods,
+**CrossOver bottles on macOS**, in **Wine prefixes** and **Steam Proton** on
+Linux and the Steam Deck, and **natively on Windows**. It installs mods from archives or straight from Nexus Mods,
 keeps per-game profiles and load orders, and deploys them safely into the game
 folder.
 
-**Cyberpunk 2077** is the first supported game. New games are added as data
+Supported games: **Cyberpunk 2077**, **The Witcher 3: Wild Hunt**, **Stardew
+Valley** and **Mount & Blade II: Bannerlord**. New games are added as data
 files, not code.
 
 > Status: early but usable. Built and tested with Cyberpunk 2077 (Steam) in a
@@ -51,14 +52,29 @@ files, not code.
   Cyber Engine Tweaks and RED4ext need, and sets them in the bottle.
 - **Play.** Applies pending changes, then starts the game through the bottle's
   Steam client (or the game executable) with `-modded` for REDmod.
+- **Installer options (FOMOD).** Mods with a FOMOD installer open a step-by-step
+  wizard with option images and descriptions; defaults are pre-selected.
+- **Collections.** Open a Nexus collection by link or from the website. Premium
+  accounts install all its mods at once; free accounts get each mod's page.
+- **Save backups.** Saves are backed up automatically before each launch (the
+  last 10 are kept, only when saves changed), or by hand; any backup can be
+  restored, and restoring backs up the current saves first.
+- **Share profiles.** Export a profile to a file and import it on another
+  machine; mods that aren't installed there are listed with links to get them.
+- **Launchers.** Steam games start through Steam, Epic games through the Epic
+  launcher, GOG games directly (DRM-free). Proton games get the Steam launch
+  options to paste.
+- **App updates.** The app checks GitHub Releases at startup and updates itself.
 - **Command line.** `mm detect`, `mm mods`, `mm health`, `mm install`,
   `mm deploy`, `mm purge`, handy on Linux or a Steam Deck.
 
 ### Not yet
 
-Nexus Collections, FOMOD installer options (default files are installed with a
-warning), native Windows and Proton environments, and games other than
-Cyberpunk 2077.
+FOMOD C# script installers, reproducing a collection curator's installer
+choices, games whose mods live outside the game folder (e.g. Baldur's Gate 3)
+or need plugin load orders (Bethesda games), and macOS code signing (needs an
+Apple Developer account; the release workflow signs as soon as its secrets are
+set).
 
 ## Getting started
 
@@ -79,7 +95,18 @@ To build installers (`.dmg`/`.app`, `.AppImage`/`.deb`/`.rpm`, `.msi`/`.exe`):
 npm run build
 ```
 
-They are written to `target/release/bundle/`. `nxm://` links from Nexus only
+They are written to `target/release/bundle/`. Local builds need the updater
+signing key: set `TAURI_SIGNING_PRIVATE_KEY` (see the Release workflow), or
+build with `npm run build -- --config '{"bundle":{"createUpdaterArtifacts":false}}'`.
+
+### Releases
+
+Push a tag such as `v0.2.0`. The Release workflow builds installers for macOS
+(universal), Linux and Windows, signs the update files and creates a draft
+GitHub release; publishing it makes the update available in the app. It needs
+the `TAURI_SIGNING_PRIVATE_KEY` repository secret, and optionally the Apple
+secrets listed in `.github/workflows/release.yml` for a signed, notarized macOS
+app. `nxm://` links from Nexus only
 open the app from an installed build: on macOS, open the built `.app` once so
 the system registers it.
 

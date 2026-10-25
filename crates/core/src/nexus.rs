@@ -149,6 +149,10 @@ pub enum DownloadStatus {
     Queued,
     Downloading,
     Installing,
+    /// The mod has installer options; waiting for the user to choose.
+    AwaitingChoices {
+        token: String,
+    },
     Done {
         mod_id: String,
         replaced_existing: bool,

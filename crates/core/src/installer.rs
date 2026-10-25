@@ -14,6 +14,7 @@ use ts_rs::TS;
 use walkdir::WalkDir;
 
 use crate::error::{Error, Result};
+use crate::fs_util::resolve_case_insensitive;
 use crate::game::GameDefinition;
 
 /// Folders that installer tools put in archives but that are never game files.
@@ -86,10 +87,19 @@ pub fn plan_install(game: &GameDefinition, root: &Path, mod_name: &str) -> Resul
         }
     } else {
         let mut claimed = BTreeSet::new();
-        // Folders marked by a file such as init.lua (CET) or info.json (REDmod).
-        for target in game.layout.iter().filter(|t| t.marker_file.is_some()) {
-            let marker = target.marker_file.as_deref().unwrap_or_default();
-            for dir in marker_dirs(&files, marker) {
+        // Folders marked by a file such as init.lua (CET) or info.json
+        // (REDmod), or by a subfolder such as The Witcher 3's `content`.
+        for target in game
+            .layout
+            .iter()
+            .filter(|t| t.marker_file.is_some() || t.marker_folder.is_some())
+        {
+            let dirs = match (&target.marker_file, &target.marker_folder) {
+                (Some(file), _) => marker_dirs(&files, file),
+                (None, Some(folder)) => marker_folder_dirs(&files, folder),
+                (None, None) => Vec::new(),
+            };
+            for dir in dirs {
                 let name = if dir.is_empty() {
                     folder_name.clone()
                 } else {
@@ -203,6 +213,11 @@ fn content_prefix(game: &GameDefinition, root: &Path, files: &[String]) -> Strin
         .iter()
         .filter_map(|t| t.marker_file.as_deref())
         .collect();
+    let marker_folders: Vec<&str> = game
+        .layout
+        .iter()
+        .filter_map(|t| t.marker_folder.as_deref())
+        .collect();
     let mut prefix = String::new();
     loop {
         let rest: Vec<&str> = files
@@ -216,7 +231,11 @@ fn content_prefix(game: &GameDefinition, root: &Path, files: &[String]) -> Strin
         let all_nested = rest.iter().all(|f| f.contains('/'));
         let is_mod_dir = markers
             .iter()
-            .any(|m| root.join(&prefix).join(only).join(m).is_file());
+            .any(|m| root.join(&prefix).join(only).join(m).is_file())
+            || marker_folders.iter().any(|m| {
+                resolve_case_insensitive(&root.join(&prefix).join(only), m)
+                    .is_some_and(|p| p.is_dir())
+            });
         if !all_nested || is_root_marker(game, only) || is_mod_dir {
             break;
         }
@@ -247,6 +266,33 @@ fn marker_dirs(files: &[&str], marker: &str) -> Vec<String> {
             .iter()
             .any(|o| o.is_empty() || dir.starts_with(&format!("{o}/")));
         if !nested {
+            outermost.push(dir);
+        }
+    }
+    outermost
+}
+
+/// Folders (relative, `""` for the top) that directly contain a subfolder
+/// named `marker`, keeping only the outermost ones.
+fn marker_folder_dirs(files: &[&str], marker: &str) -> Vec<String> {
+    let mut dirs: Vec<String> = files
+        .iter()
+        .filter_map(|f| {
+            let parts: Vec<&str> = f.split('/').collect();
+            let at = parts[..parts.len() - 1]
+                .iter()
+                .position(|p| p.eq_ignore_ascii_case(marker))?;
+            Some(parts[..at].join("/"))
+        })
+        .collect();
+    dirs.sort_by_key(|d| d.len());
+    dirs.dedup();
+    let mut outermost: Vec<String> = Vec::new();
+    for dir in dirs {
+        if !outermost
+            .iter()
+            .any(|o| o.is_empty() || dir.starts_with(&format!("{o}/")))
+        {
             outermost.push(dir);
         }
     }
@@ -399,6 +445,29 @@ mod tests {
             "bin/x64/plugins/cyber_engine_tweaks/fonts/a.ttf",
         ]);
         assert_eq!(p.kinds, ["cet"]);
+    }
+
+    #[test]
+    fn witcher_mod_folders_are_found_by_content_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in [
+            "Pack v2/modBetterUI/content/blob0.bundle",
+            "Pack v2/modBetterUI/content/scripts/x.ws",
+            "Pack v2/readme.txt",
+        ] {
+            let path = dir.path().join(f);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"x").unwrap();
+        }
+        let plan =
+            plan_install(&find_builtin("witcher3").unwrap(), dir.path(), "Better UI").unwrap();
+        assert_eq!(
+            targets(&plan),
+            [
+                "Mods/modBetterUI/content/blob0.bundle",
+                "Mods/modBetterUI/content/scripts/x.ws"
+            ]
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@ import type { Download } from "../bindings/Download";
 import type { GameDefinition } from "../bindings/GameDefinition";
 import type { NexusStatus } from "../bindings/NexusStatus";
 import { Icon } from "../components/Icon";
+import { useFomodQueue } from "../components/FomodQueue";
 import { useToast } from "../components/Toasts";
 import { formatBytes } from "../format";
 
@@ -12,6 +13,7 @@ const STATUS_LABEL: Record<Download["status"]["state"], string> = {
   Queued: "Waiting",
   Downloading: "Downloading",
   Installing: "Installing",
+  AwaitingChoices: "Needs your choices",
   Done: "Installed",
   Failed: "Failed",
 };
@@ -30,10 +32,16 @@ export function DownloadsView({
   onNavigate: (view: View) => void;
 }) {
   const toast = useToast();
+  const enqueueFomod = useFomodQueue();
   const [link, setLink] = useState("");
   const finished = downloads.some((d) => d.status.state === "Done" || d.status.state === "Failed");
 
   const submit = async () => {
+    if (link.includes("/collections/")) {
+      onNavigate({ kind: "collections", link: link.trim() });
+      setLink("");
+      return;
+    }
     try {
       await api.handleNxm(link.trim());
       setLink("");
@@ -115,6 +123,24 @@ export function DownloadsView({
                   {d.bytes_total ? ` · ${formatBytes(state === "Downloading" ? d.bytes_done : d.bytes_total)}${state === "Downloading" ? ` of ${formatBytes(d.bytes_total)}` : ""}` : ""}
                 </div>
                 {d.status.state === "Failed" && <p className="error">{d.status.message}</p>}
+                {d.status.state === "AwaitingChoices" && (
+                  <div className="row">
+                    <span className="muted small">This mod has installer options.</span>
+                    <button
+                      className="primary"
+                      onClick={async () => {
+                        const token = (d.status as { token: string }).token;
+                        try {
+                          enqueueFomod(await api.getFomod(token));
+                        } catch (e) {
+                          toast("error", "Couldn't open the installer", errorMessage(e));
+                        }
+                      }}
+                    >
+                      Choose options
+                    </button>
+                  </div>
+                )}
                 {d.status.state === "Done" && d.status.warnings.map((w) => <p key={w} className="warn-text">{w}</p>)}
               </li>
             );
