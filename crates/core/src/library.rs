@@ -40,6 +40,7 @@ use crate::requirements::{self, FrameworkState, FrameworkStatus, MissingRequirem
 use crate::saves;
 use crate::store::{ModFile, ModRecord, ModRevision, Profile, ProfileEntry, Store};
 use crate::updates::{CheckOutcome, UpdateCheck, UpdateSummary};
+use crate::validate::{self, CheckResult};
 
 /// What is known about a mod before installing it.
 #[derive(Debug, Clone, Default)]
@@ -160,6 +161,10 @@ pub struct LoadoutMod {
     pub requires: Vec<DependencyStatus>,
     /// Enabled mods that need this one.
     pub required_by: Vec<String>,
+    /// What the static checks found in its files.
+    pub checks: Vec<CheckResult>,
+    /// A check says it won't load.
+    pub wont_load: bool,
 }
 
 const PROFILE_FORMAT: &str = "mod-manager-profile";
@@ -1964,6 +1969,7 @@ impl Library {
             })
         };
         self.set_framework_versions(game, instance, &mut analysis.frameworks, &mods);
+        let mut checks = self.mod_checks(game, &mods)?;
         let mut dependencies = {
             let nodes: Vec<ModNode> = entries
                 .iter()
@@ -2017,6 +2023,10 @@ impl Library {
                         .required_by
                         .remove(&e.mod_id)
                         .unwrap_or_default(),
+                    wont_load: checks
+                        .get(&e.mod_id)
+                        .is_some_and(|c| validate::wont_load(c)),
+                    checks: checks.remove(&e.mod_id).unwrap_or_default(),
                 })
             })
             .collect();
@@ -2050,6 +2060,35 @@ impl Library {
                 .as_ref()
                 .map(|_| self.archive_order(&instance.id)),
         })
+    }
+
+    /// Static check results of the game's mods, checking any installed or
+    /// changed since they were last checked.
+    fn mod_checks(
+        &self,
+        game: &GameDefinition,
+        mods: &HashMap<String, ModRecord>,
+    ) -> Result<HashMap<String, Vec<CheckResult>>> {
+        let mut known = self.store.mod_checks()?;
+        let mut out = HashMap::new();
+        for m in mods.values() {
+            let results = match known.remove(&m.id) {
+                Some((revision, results)) if revision == m.revision => results,
+                _ => {
+                    let files = self.store.mod_files(&m.id)?;
+                    let results = validate::check_mod(
+                        game,
+                        &self.mod_dir(&m.id),
+                        &files,
+                        assumed_root_len(game),
+                    );
+                    self.store.set_mod_checks(&m.id, m.revision, &results)?;
+                    results
+                }
+            };
+            out.insert(m.id.clone(), results);
+        }
+        Ok(out)
     }
 
     /// Fills in each installed framework's version (from its DLL's version
@@ -2642,6 +2681,18 @@ fn backup_database(root: &Path, db: &Path, reason: &str) -> Result<()> {
     Ok(())
 }
 
+/// A likely length of the game folder's Windows path, for the path length
+/// check at install: its longest known install path, or a Steam library's.
+fn assumed_root_len(game: &GameDefinition) -> usize {
+    let steam = r"C:\Program Files (x86)\Steam\steamapps\common\".len() + game.name.len();
+    game.known_install_paths
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or(0)
+        .max(steam)
+}
+
 /// Folders mods are dropped into stay even when empty; a framework's own
 /// folder (no extensions or marker) is removed with it.
 fn protected_dirs(game: &GameDefinition) -> Vec<String> {
@@ -2917,6 +2968,35 @@ mod tests {
         let version = crate::detect::file_version(Path::new(&path)).unwrap();
         println!("{path}: {version}");
         assert!(version.chars().next().unwrap().is_ascii_digit());
+    }
+
+    #[test]
+    fn static_checks_flag_mods_that_wont_load() {
+        let mut f = fixture();
+        let id = f.instance.id.clone();
+        let good = zip(
+            &f,
+            "good.zip",
+            &[("r6/tweaks/Good/good.yaml", "Items.Good:\n  price: 5\n")],
+        );
+        let bad = zip(
+            &f,
+            "bad.zip",
+            &[("r6/tweaks/Bad/bad.yaml", "key: \"unterminated\n")],
+        );
+        f.lib
+            .install_archive(&f.game, &good, ModMeta::default(), Some(&id))
+            .unwrap();
+        f.lib
+            .install_archive(&f.game, &bad, ModMeta::default(), Some(&id))
+            .unwrap();
+        let loadout = f.lib.loadout(&f.game, &f.instance).unwrap();
+        let by_name = |n: &str| loadout.mods.iter().find(|m| m.record.name == n).unwrap();
+        assert!(!by_name("good").wont_load);
+        assert!(by_name("bad").wont_load);
+        assert_eq!(by_name("bad").checks[0].check, "yaml");
+        // Stored per revision: a second loadout doesn't check again.
+        assert_eq!(f.lib.store().mod_checks().unwrap().len(), 2);
     }
 
     #[test]

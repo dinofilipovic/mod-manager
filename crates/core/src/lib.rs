@@ -3,6 +3,7 @@
 //! and shared by the CLI and the desktop app.
 
 pub mod archive;
+pub mod archive_index;
 pub mod archives;
 pub mod collections;
 pub mod dependencies;
@@ -23,6 +24,7 @@ pub mod requirements;
 pub mod saves;
 pub mod store;
 pub mod updates;
+pub mod validate;
 mod vdf;
 
 use serde::Serialize;

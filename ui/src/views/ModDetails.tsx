@@ -270,6 +270,23 @@ export function ModDetails({
         )}
       </dl>
 
+      {entry.checks.length > 0 && (
+        <div className={`callout ${entry.wont_load ? "callout-bad" : "callout-neutral"}`}>
+          <strong>{entry.wont_load ? "Won't load as installed" : "Worth checking"}</strong>
+          <ul className="check-list">
+            {entry.checks.slice(0, 8).map((c, i) => (
+              <li key={i} className={c.severity === "Error" ? "error-text" : undefined}>
+                {c.message}
+              </li>
+            ))}
+            {entry.checks.length > 8 && <li className="muted">and {entry.checks.length - 8} more</li>}
+          </ul>
+          {entry.wont_load && (
+            <p className="small">Download it again, try another version, or ask on the mod's page; removing it keeps the game clean.</p>
+          )}
+        </div>
+      )}
+
       <Requirements
         entry={entry}
         gameDomain={gameDomain}

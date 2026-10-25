@@ -190,6 +190,21 @@ pub struct LayoutTarget {
     pub per_mod_folder: bool,
     #[serde(default)]
     pub description: String,
+    /// Built-in checks run on files installed here (see `validate.rs`).
+    #[serde(default)]
+    pub checks: Vec<LayoutCheck>,
+}
+
+/// A built-in checker and the files it applies to.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct LayoutCheck {
+    /// `archive_header`, `json`, `yaml`, `lua_entry` or `pe64_dll`.
+    pub checker: String,
+    /// File extensions it looks at; `lua_entry` checks mod folders and needs none.
+    #[serde(default)]
+    pub extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -269,6 +284,11 @@ impl GameDefinition {
                 return Err(invalid(format!(
                     "path '{path}' must be relative and stay inside the game folder"
                 )));
+            }
+        }
+        for check in self.layout.iter().flat_map(|t| &t.checks) {
+            if !crate::validate::CHECKERS.contains(&check.checker.as_str()) {
+                return Err(invalid(format!("unknown checker '{}'", check.checker)));
             }
         }
         let known = |id: &str| self.frameworks.iter().any(|f| f.id == id);

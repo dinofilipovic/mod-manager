@@ -10,6 +10,7 @@ use crate::archives::{ArchiveRecord, ArchiveSource};
 use crate::dependencies::{Dependency, DependencyKind, DependencySource};
 use crate::error::Result;
 use crate::nexus::{Changelog, Download, DownloadStatus};
+use crate::validate::CheckResult;
 
 pub const SCHEMA_VERSION: i32 = 3;
 
@@ -142,6 +143,13 @@ CREATE TABLE mod_dependencies (
     notes TEXT,
     url TEXT,
     PRIMARY KEY (mod_id, kind, target, source)
+);
+
+CREATE TABLE mod_checks (
+    mod_id TEXT NOT NULL REFERENCES mods(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL,
+    results TEXT NOT NULL,
+    PRIMARY KEY (mod_id)
 );
 
 CREATE TABLE changelogs (
@@ -669,6 +677,44 @@ impl Store {
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    // Static checks
+
+    /// Each mod's check results and the revision they are for.
+    pub fn mod_checks(&self) -> Result<std::collections::HashMap<String, (u32, Vec<CheckResult>)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT mod_id, revision, results FROM mod_checks")?;
+        let rows = stmt.query_map([], |r| {
+            let results: String = r.get(2)?;
+            Ok((
+                r.get::<_, String>(0)?,
+                (
+                    r.get(1)?,
+                    serde_json::from_str(&results).unwrap_or_default(),
+                ),
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_mod_checks(
+        &self,
+        mod_id: &str,
+        revision: u32,
+        results: &[CheckResult],
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO mod_checks (mod_id, revision, results) VALUES (?1, ?2, ?3)
+             ON CONFLICT(mod_id) DO UPDATE SET revision = ?2, results = ?3",
+            params![
+                mod_id,
+                revision,
+                serde_json::to_string(results).unwrap_or_else(|_| "[]".into())
+            ],
+        )?;
         Ok(())
     }
 

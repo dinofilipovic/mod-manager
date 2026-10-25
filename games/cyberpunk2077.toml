@@ -44,6 +44,12 @@ path = "archive/pc/mod"
 extensions = ["archive", "xl"]
 flatten = true
 description = "Archive mods (.archive) and ArchiveXL definitions (.xl)"
+# .archive layout from WolvenKit (WolvenKit.RED4/Archive/IO/ArchiveReader.cs),
+# checked against the game's own archives; ArchiveXL .xl files are YAML.
+checks = [
+  { checker = "archive_header", extensions = ["archive"] },
+  { checker = "yaml", extensions = ["xl"] },
+]
 
 [[layout]]
 kind = "redscript"
@@ -58,12 +64,16 @@ path = "r6/tweaks"
 extensions = ["yaml", "yml", "tweak"]
 per_mod_folder = true
 description = "TweakXL tweaks"
+checks = [{ checker = "yaml", extensions = ["yaml", "yml"] }]
 
 [[layout]]
 kind = "cet"
 path = "bin/x64/plugins/cyber_engine_tweaks/mods"
 marker_file = "init.lua"
 description = "Cyber Engine Tweaks Lua mods"
+# CET loads mods/<name>/init.lua (ScriptStore.cpp: "Ignoring mod which does
+# not contain init.lua").
+checks = [{ checker = "lua_entry" }, { checker = "json", extensions = ["json"] }]
 
 [[layout]]
 kind = "red4ext"
@@ -71,6 +81,8 @@ path = "red4ext/plugins"
 extensions = ["dll"]
 per_mod_folder = true
 description = "RED4ext plugins"
+# The game is 64-bit, so RED4ext can only load 64-bit DLLs.
+checks = [{ checker = "pe64_dll", extensions = ["dll"] }]
 
 # The script extenders' own folders, so they are recognised by type. They have
 # no extensions or marker, so loose files are never routed here.
@@ -89,6 +101,7 @@ kind = "redmod"
 path = "mods"
 marker_file = "info.json"
 description = "REDmod mods (mods/<name>/info.json), need the -modded launch argument"
+checks = [{ checker = "json", extensions = ["json"] }]
 
 # DLL loaders that Wine must load from the game folder instead of its built-ins.
 [[wine.dll_overrides]]

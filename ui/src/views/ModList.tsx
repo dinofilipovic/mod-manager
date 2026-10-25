@@ -112,6 +112,11 @@ export function ModList({
                 </span>
               </span>
               <span className="mod-badges">
+                {entry.wont_load && (
+                  <span className="badge badge-error" title={entry.checks.map((c) => c.message).join("\n")}>
+                    <Icon name="alert" size={11} /> Won't load
+                  </span>
+                )}
                 {entry.enabled && unmet.length > 0 && (
                   <span className="badge badge-error" title={unmet.map((d) => `${d.name}: ${stateLabel(d)}`).join("\n")}>
                     <Icon name="alert" size={11} /> {unmetSummary(unmet)}
