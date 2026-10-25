@@ -1,0 +1,4 @@
+[2026-10-25 14:03:20 UTC+00:00] [9120] LuaVM: initialization finished!
+[2026-10-25 14:03:20 UTC+00:00] [9120] Mod nativeSettings loaded! ('C:\Program Files (x86)\Steam\steamapps\common\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\nativeSettings')
+[2026-10-25 14:03:20 UTC+00:00] [9120] Mod BrokenHud failed to load! ('C:\Program Files (x86)\Steam\steamapps\common\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\BrokenHud')
+[2026-10-25 14:03:20 UTC+00:00] [9120] Ignoring mod which does not contain init.lua! ('C:\Program Files (x86)\Steam\steamapps\common\Cyberpunk 2077\bin\x64\plugins\cyber_engine_tweaks\mods\Nested')

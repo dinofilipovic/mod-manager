@@ -13,3 +13,5 @@ crates/app/gen/schemas/
 # OS
 .DS_Store
 Thumbs.db
+# Log excerpts the load-status tests read.
+!crates/core/tests/fixtures/logs/*.log
