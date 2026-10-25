@@ -121,9 +121,11 @@ pub struct GameState {
     /// When the game's executable last changed (an update), if seen.
     #[ts(type = "number | null")]
     pub updated_at: Option<i64>,
-    /// Frameworks installed before that update. Script extenders usually
-    /// need a new version after a game patch.
+    /// Frameworks installed before that update whose needed version isn't
+    /// known. Script extenders usually need a new version after a game patch.
     pub outdated_frameworks: Vec<String>,
+    /// Frameworks older than the version this game version needs.
+    pub too_old_frameworks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, TS)]
@@ -1781,7 +1783,7 @@ impl Library {
             .iter()
             .map(|e| self.store.mod_files(&e.mod_id))
             .collect::<Result<_>>()?;
-        let analysis = {
+        let mut analysis = {
             let mod_files: Vec<ModFiles> = entries
                 .iter()
                 .zip(&files)
@@ -1806,6 +1808,7 @@ impl Library {
                 })
             })
         };
+        self.set_framework_versions(game, instance, &mut analysis.frameworks, &mods);
 
         let loadout_mods = entries
             .iter()
@@ -1859,7 +1862,59 @@ impl Library {
         })
     }
 
-    /// Notes game updates and which installed frameworks predate the last one.
+    /// Fills in each installed framework's version (from its DLL's version
+    /// resource, else the version of the mod that installed it) and whether
+    /// it is too old for this game version.
+    fn set_framework_versions(
+        &self,
+        game: &GameDefinition,
+        instance: &GameInstance,
+        frameworks: &mut [FrameworkStatus],
+        mods: &HashMap<String, ModRecord>,
+    ) {
+        for status in frameworks.iter_mut().filter(|f| f.is_available()) {
+            let Some(framework) = game.framework(&status.id) else {
+                continue;
+            };
+            let provider = match &status.state {
+                FrameworkState::Installed { mod_name } => {
+                    mods.values().find(|m| &m.name == mod_name)
+                }
+                _ => None,
+            };
+            let binary = framework.provides.iter().find_map(|p| {
+                let has_version_resource = Path::new(p).extension().is_some_and(|e| {
+                    ["dll", "asi", "exe"]
+                        .iter()
+                        .any(|x| e.eq_ignore_ascii_case(x))
+                });
+                if !has_version_resource {
+                    return None;
+                }
+                // The library's copy works before the mod is applied too.
+                let path = provider
+                    .and_then(|m| resolve_case_insensitive(&self.mod_dir(&m.id), p))
+                    .or_else(|| resolve_case_insensitive(&instance.install_path, p))?;
+                crate::detect::file_version(&path)
+            });
+            status.version = binary.or_else(|| provider.and_then(|m| m.version.clone()));
+            status.min_version = instance
+                .version
+                .as_deref()
+                .and_then(|v| framework.min_version_for(v))
+                .map(String::from);
+            status.too_old = match (&status.version, &status.min_version) {
+                (Some(have), Some(need)) => {
+                    crate::updates::compare_versions(have, need) == std::cmp::Ordering::Less
+                }
+                _ => false,
+            };
+        }
+    }
+
+    /// Notes game updates and which installed frameworks are too old for
+    /// the game: by their version where the game definition says which
+    /// version is needed, else by being installed before the last update.
     fn game_state(
         &self,
         instance: &GameInstance,
@@ -1872,9 +1927,16 @@ impl Library {
             self.store
                 .observe_game(&instance.id, &instance.fingerprint, now())?
         };
+        let too_old_frameworks = frameworks
+            .iter()
+            .filter(|f| f.too_old)
+            .map(|f| f.name.clone())
+            .collect();
         let outdated_frameworks = match updated_at {
             Some(updated) => frameworks
                 .iter()
+                // Known versions settle it; the heuristic is for the rest.
+                .filter(|f| f.version.is_none() || f.min_version.is_none())
                 .filter_map(|f| match &f.state {
                     FrameworkState::Installed { mod_name } => mods
                         .values()
@@ -1890,6 +1952,7 @@ impl Library {
             build_id: instance.build_id.clone(),
             updated_at,
             outdated_frameworks,
+            too_old_frameworks,
         })
     }
 
@@ -2607,6 +2670,65 @@ mod tests {
         fs::write(&scc, "x").unwrap();
         let loadout = f.lib.loadout(&f.game, &f.instance).unwrap();
         assert!(loadout.mods[0].missing_requirements.is_empty());
+    }
+
+    #[test]
+    fn frameworks_older_than_the_game_needs_are_flagged() {
+        let mut f = fixture();
+        f.instance.version = Some("2.5".into());
+        let id = f.instance.id.clone();
+        let scc = zip(
+            &f,
+            "redscript.zip",
+            &[("engine/tools/scc.exe", "not a real exe")],
+        );
+        let meta = |v: &str| ModMeta {
+            name: Some("redscript".into()),
+            version: Some(v.into()),
+            nexus_mod_id: Some(1511),
+            nexus_file_id: Some(v.len() as u32),
+            ..Default::default()
+        };
+        let installed = f
+            .lib
+            .install_archive(&f.game, &scc, meta("0.5.31"), Some(&id))
+            .unwrap();
+        let loadout = f.lib.loadout(&f.game, &f.instance).unwrap();
+        let redscript = loadout
+            .frameworks
+            .iter()
+            .find(|f| f.id == "redscript")
+            .unwrap();
+        assert_eq!(
+            redscript.version.as_deref(),
+            Some("0.5.31"),
+            "from the mod, scc.exe has no version"
+        );
+        assert_eq!(redscript.min_version.as_deref(), Some("0.5.32"));
+        assert!(redscript.too_old);
+        assert_eq!(loadout.game.too_old_frameworks, ["redscript"]);
+
+        let newer = zip(&f, "redscript2.zip", &[("engine/tools/scc.exe", "newer")]);
+        let meta = ModMeta {
+            replaces: Some(installed.record.id),
+            ..meta("0.5.32")
+        };
+        f.lib
+            .install_archive(&f.game, &newer, meta, Some(&id))
+            .unwrap();
+        let loadout = f.lib.loadout(&f.game, &f.instance).unwrap();
+        assert!(loadout.game.too_old_frameworks.is_empty());
+        assert!(!loadout.frameworks.iter().any(|f| f.too_old));
+    }
+
+    /// Reads a real framework DLL's version: `MM_PE_SAMPLE=<path> cargo test -- --ignored`.
+    #[test]
+    #[ignore = "needs a real Windows DLL"]
+    fn reads_a_real_file_version() {
+        let path = std::env::var("MM_PE_SAMPLE").expect("set MM_PE_SAMPLE");
+        let version = crate::detect::file_version(Path::new(&path)).unwrap();
+        println!("{path}: {version}");
+        assert!(version.chars().next().unwrap().is_ascii_digit());
     }
 
     #[test]

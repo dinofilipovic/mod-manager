@@ -5,4 +5,16 @@ export type FrameworkStatus = { id: string, name: string, nexus_mod_id: number |
 /**
  * Enabled mods that need it.
  */
-needed_by: Array<string>, };
+needed_by: Array<string>, 
+/**
+ * The installed version, when it can be told.
+ */
+version: string | null, 
+/**
+ * The oldest version that works with this game version, when known.
+ */
+min_version: string | null, 
+/**
+ * Installed, but older than `min_version`.
+ */
+too_old: boolean, };

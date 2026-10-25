@@ -230,7 +230,10 @@ export function GameView({
   const missingDlls = instance.dll_overrides.filter((d) => !d.satisfied);
   const modsMissing = mods.filter((m) => m.enabled && m.missing_requirements.length > 0);
   const missingNames = [...new Set(modsMissing.flatMap((m) => m.missing_requirements.map((r) => r.name)))];
-  const healthIssues = missingNames.length + (loadout?.game.outdated_frameworks.length ? 1 : 0);
+  const healthIssues =
+    missingNames.length +
+    (loadout?.game.outdated_frameworks.length ? 1 : 0) +
+    (loadout?.game.too_old_frameworks.length ?? 0);
   const enabledCount = mods.filter((m) => m.enabled).length;
   const activeProfile = loadout?.profiles.find((p) => p.id === loadout.active_profile_id);
   const selectedMod = mods.find((m) => m.mod.id === selected) ?? null;

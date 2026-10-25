@@ -6,7 +6,11 @@ export type GameState = { version: string | null, build_id: string | null,
  */
 updated_at: number | null, 
 /**
- * Frameworks installed before that update. Script extenders usually
- * need a new version after a game patch.
+ * Frameworks installed before that update whose needed version isn't
+ * known. Script extenders usually need a new version after a game patch.
  */
-outdated_frameworks: Array<string>, };
+outdated_frameworks: Array<string>, 
+/**
+ * Frameworks older than the version this game version needs.
+ */
+too_old_frameworks: Array<string>, };

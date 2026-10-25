@@ -89,6 +89,18 @@ export function HealthView({
           <dt>Last update</dt>
           <dd>{game.updated_at ? timeAgo(game.updated_at) : "None seen since this app started tracking it"}</dd>
         </dl>
+        {game.too_old_frameworks.length > 0 && (
+          <div className="notice notice-error">
+            <Icon name="alert" />
+            <div>
+              <strong>Too old for game version {game.version}: {game.too_old_frameworks.join(", ")}</strong>
+              <p>
+                Mods that need {game.too_old_frameworks.length === 1 ? "it" : "them"} won't load. Update{" "}
+                {game.too_old_frameworks.length === 1 ? "it" : "them"} (see Frameworks below), then apply.
+              </p>
+            </div>
+          </div>
+        )}
         {game.outdated_frameworks.length > 0 && (
           <div className="notice notice-warn">
             <Icon name="alert" />
@@ -260,24 +272,41 @@ function FrameworkRow({
     <li className="framework">
       <span
         className={`status-pill ${
-          state.state === "Installed" || state.state === "InstalledManually" ? "ok" : needed ? "bad" : "warn"
+          f.too_old
+            ? "bad"
+            : state.state === "Installed" || state.state === "InstalledManually"
+              ? "ok"
+              : needed
+                ? "bad"
+                : "warn"
         }`}
       >
-        {state.state === "Installed"
-          ? "Installed"
-          : state.state === "InstalledManually"
-            ? "Installed manually"
-            : state.state === "Disabled"
-              ? "Disabled"
-              : "Missing"}
+        {f.too_old
+          ? "Too old"
+          : state.state === "Installed"
+            ? "Installed"
+            : state.state === "InstalledManually"
+              ? "Installed manually"
+              : state.state === "Disabled"
+                ? "Disabled"
+                : "Missing"}
       </span>
       <div className="framework-text">
-        <strong>{f.name}</strong>
+        <strong>
+          {f.name}
+          {f.version && <span className="muted small"> {f.version}</span>}
+        </strong>
         <small className="muted">
+          {f.too_old && `This game version needs ${f.min_version} or newer. `}
           {needed ? `Needed by ${f.needed_by.join(", ")}` : "Not needed by your enabled mods"}
           {state.state === "Installed" && state.mod_name !== f.name && ` · from “${state.mod_name}”`}
         </small>
       </div>
+      {f.too_old && page && (
+        <button className="primary" onClick={() => openExternal(page)}>
+          <Icon name="external" /> Get {f.min_version}
+        </button>
+      )}
       {state.state === "Disabled" && (
         <button className="primary" onClick={() => onEnableMod(state.mod_id)}>
           Enable

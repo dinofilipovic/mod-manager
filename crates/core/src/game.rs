@@ -62,6 +62,51 @@ pub struct Framework {
     /// Frameworks this one needs.
     #[serde(default)]
     pub requires: Vec<String>,
+    /// The oldest version that works with each game version. Only values
+    /// with a cited source (release notes, code) belong here.
+    #[serde(default)]
+    pub min_versions: Vec<MinVersion>,
+}
+
+/// From game version `game` on, the framework needs at least `version`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct MinVersion {
+    pub game: String,
+    pub version: String,
+}
+
+impl Framework {
+    /// The minimum version for this game version: the entry for the newest
+    /// game version not after it.
+    pub fn min_version_for(&self, game_version: &str) -> Option<&str> {
+        use std::cmp::Ordering;
+        self.min_versions
+            .iter()
+            .filter(|m| compare_game_versions(&m.game, game_version) != Ordering::Greater)
+            .max_by(|a, b| compare_game_versions(&a.game, &b.game))
+            .map(|m| m.version.as_str())
+    }
+}
+
+/// Compares game versions as decimal numbers, the way game patches are
+/// numbered: 2.3 < 2.31 < 2.5 < 2.51 (unlike mod versions, where 2.31 > 2.5).
+pub fn compare_game_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    fn split(v: &str) -> (u64, String) {
+        let v = v.trim().trim_start_matches(['v', 'V']);
+        let (major, rest) = v.split_once('.').unwrap_or((v, ""));
+        let fraction: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        (major.parse().unwrap_or(0), fraction)
+    }
+    let ((major_a, mut frac_a), (major_b, mut frac_b)) = (split(a), split(b));
+    let len = frac_a.len().max(frac_b.len());
+    for f in [&mut frac_a, &mut frac_b] {
+        while f.len() < len {
+            f.push('0');
+        }
+    }
+    major_a.cmp(&major_b).then(frac_a.cmp(&frac_b))
 }
 
 /// Mod files that need a framework: matched by extension or by folder.
@@ -279,6 +324,22 @@ mod tests {
         assert_eq!(cp.wine.dll_overrides.len(), 2);
         assert!(cp.framework("redscript").is_some());
         assert!(cp.load_order.is_some());
+        let cet = cp.framework("cet").unwrap();
+        assert_eq!(cet.min_version_for("2.5"), Some("1.38.0"));
+        assert_eq!(
+            cet.min_version_for("2.51"),
+            Some("1.38.0"),
+            "until a newer entry"
+        );
+        assert_eq!(
+            cet.min_version_for("2.31"),
+            None,
+            "no data for older patches"
+        );
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_game_versions("2.31", "2.5"), Less);
+        assert_eq!(compare_game_versions("2.5", "2.50"), Equal);
+        assert_eq!(compare_game_versions("3.0", "2.51"), Greater);
     }
 
     #[test]

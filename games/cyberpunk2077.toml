@@ -106,23 +106,36 @@ modded_args = ["-modded"]
 
 # Frameworks other mods build on. `provides` are files that prove it is
 # installed; `requires` lists frameworks it needs itself.
+#
+# `min_versions`: from game version `game` (the executable's product version,
+# compared as a decimal: 2.31 is before 2.5) on, the framework needs at least
+# `version`. Only values a release note states; patches without a cited
+# minimum are left out.
 [[frameworks]]
 id = "cet"
 name = "Cyber Engine Tweaks"
 nexus_mod_id = 107
 provides = ["bin/x64/plugins/cyber_engine_tweaks.asi"]
+# CET 1.38.0 release notes (github.com/maximegmd/CyberEngineTweaks, 2026-10-22):
+# "Supports Cyberpunk 2077 patch 2.5 ... Earlier patches are no longer supported."
+min_versions = [{ game = "2.5", version = "1.38.0" }]
 
 [[frameworks]]
 id = "red4ext"
 name = "RED4ext"
 nexus_mod_id = 2380
 provides = ["red4ext/RED4ext.dll"]
+# No minimum for patch 2.5: RED4ext 1.29.0 claims support for "patch 2.31 and
+# newer" and 1.31.0 only raises its own minimum to 2.5.
 
 [[frameworks]]
 id = "redscript"
 name = "redscript"
 nexus_mod_id = 1511
 provides = ["engine/tools/scc.exe"]
+# redscript 0.5.32 release notes (github.com/jac3km4/redscript, 2026-10-22):
+# "fix: support script bundles from game patch 2.5".
+min_versions = [{ game = "2.5", version = "0.5.32" }]
 
 [[frameworks]]
 id = "archivexl"
@@ -130,6 +143,9 @@ name = "ArchiveXL"
 nexus_mod_id = 4198
 provides = ["red4ext/plugins/ArchiveXL/ArchiveXL.dll"]
 requires = ["red4ext"]
+# ArchiveXL 1.28.0 release notes (github.com/psiberx/cp2077-archive-xl,
+# 2026-10-25): "Updated compatibility to game patch 2.5".
+min_versions = [{ game = "2.5", version = "1.28.0" }]
 
 [[frameworks]]
 id = "tweakxl"
@@ -137,12 +153,47 @@ name = "TweakXL"
 nexus_mod_id = 4197
 provides = ["red4ext/plugins/TweakXL/TweakXL.dll"]
 requires = ["red4ext"]
+# TweakXL 1.12.0 release notes (github.com/psiberx/cp2077-tweak-xl,
+# 2026-10-25): "Updated compatibility to game patch 2.5".
+min_versions = [{ game = "2.5", version = "1.12.0" }]
 
 [[frameworks]]
 id = "codeware"
 name = "Codeware"
 nexus_mod_id = 7780
 provides = ["red4ext/plugins/Codeware/Codeware.dll"]
+requires = ["red4ext"]
+# Codeware 1.21.0 release notes (github.com/psiberx/cp2077-codeware,
+# 2026-10-25): "Updated compatibility to game patch 2.5".
+min_versions = [{ game = "2.5", version = "1.21.0" }]
+
+# Libraries many mods require. Ids, requirements and files from Nexus Mods
+# (v2 API `legacyModsByDomain` and the files' content previews, 2026-10-25).
+[[frameworks]]
+id = "mod_settings"
+name = "Mod Settings"
+nexus_mod_id = 4885
+# Mod Settings 0.2.21: red4ext/plugins/mod_settings/{mod_settings.dll,
+# ModSettings.archive, module.reds, ...}; requires RED4ext, redscript, ArchiveXL.
+provides = ["red4ext/plugins/mod_settings/mod_settings.dll"]
+requires = ["red4ext", "redscript", "archivexl"]
+
+[[frameworks]]
+id = "native_settings"
+name = "Native Settings UI"
+nexus_mod_id = 3518
+# Native Settings UI 1.96 (the 1.97 preview isn't published): a CET mod in
+# bin/x64/plugins/cyber_engine_tweaks/mods/nativeSettings; requires CET.
+provides = ["bin/x64/plugins/cyber_engine_tweaks/mods/nativeSettings/init.lua"]
+requires = ["cet"]
+
+[[frameworks]]
+id = "input_loader"
+name = "Input Loader"
+nexus_mod_id = 4575
+# Input Loader 0.2.3: red4ext/plugins/input_loader/input_loader.dll and
+# engine/config/platform/pc/input_loader.ini; requires RED4ext.
+provides = ["red4ext/plugins/input_loader/input_loader.dll"]
 requires = ["red4ext"]
 
 # Which mod files need which framework: by extension, or by folder.

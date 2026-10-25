@@ -45,6 +45,12 @@ pub struct FrameworkStatus {
     pub state: FrameworkState,
     /// Enabled mods that need it.
     pub needed_by: Vec<String>,
+    /// The installed version, when it can be told.
+    pub version: Option<String>,
+    /// The oldest version that works with this game version, when known.
+    pub min_version: Option<String>,
+    /// Installed, but older than `min_version`.
+    pub too_old: bool,
 }
 
 impl FrameworkStatus {
@@ -71,9 +77,13 @@ pub struct Analysis {
     pub frameworks: Vec<FrameworkStatus>,
     /// Missing requirements per enabled mod id.
     pub missing: BTreeMap<String, Vec<MissingRequirement>>,
+    /// The frameworks each enabled mod needs (directly or through another
+    /// framework), by id.
+    pub needs: BTreeMap<String, Vec<String>>,
 }
 
-fn provides(framework: &Framework, files: &[String]) -> bool {
+/// Whether a mod's files include the framework's.
+pub fn provides(framework: &Framework, files: &[String]) -> bool {
     framework
         .provides
         .iter()
@@ -152,10 +162,22 @@ pub fn analyze(
                 nexus_mod_id: f.nexus_mod_id,
                 state,
                 needed_by,
+                version: None,
+                min_version: None,
+                too_old: false,
             }
         })
         .collect();
 
+    let needs_by_mod = needs
+        .iter()
+        .map(|(id, wanted)| {
+            (
+                id.to_string(),
+                wanted.iter().map(|w| w.to_string()).collect(),
+            )
+        })
+        .collect();
     let missing = needs
         .into_iter()
         .map(|(mod_id, wanted)| {
@@ -180,6 +202,7 @@ pub fn analyze(
     Analysis {
         frameworks,
         missing,
+        needs: needs_by_mod,
     }
 }
 

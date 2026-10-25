@@ -192,6 +192,30 @@ pub fn exe_version(exe: &std::path::Path) -> Option<String> {
     from_strings.or_else(|| info.fixed().map(|f| f.dwProductVersion.to_string()))
 }
 
+/// A DLL's or executable's own version, for telling framework versions apart:
+/// the `FileVersion` string (`v1.38.0 [HEAD]` becomes `1.38.0`), else the
+/// fixed file version.
+pub fn file_version(path: &std::path::Path) -> Option<String> {
+    use pelite::pe64::Pe;
+    let map = pelite::FileMap::open(path).ok()?;
+    let file = pelite::pe64::PeFile::from_bytes(map.as_ref()).ok()?;
+    let info = file.resources().ok()?.version_info().ok()?;
+    let from_strings = info
+        .translation()
+        .first()
+        .and_then(|lang| info.value(*lang, "FileVersion"))
+        .map(|v| {
+            v.trim()
+                .trim_start_matches(['v', 'V'])
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .filter(|v| v.chars().next().is_some_and(|c| c.is_ascii_digit()));
+    from_strings.or_else(|| info.fixed().map(|f| f.dwFileVersion.to_string()))
+}
+
 /// Steam's build id from the app manifest next to a Steam library install
 /// (`<library>/steamapps/common/<game>` -> `<library>/steamapps/appmanifest_<id>.acf`).
 fn steam_build_id(game: &GameDefinition, install_path: &std::path::Path) -> Option<String> {
