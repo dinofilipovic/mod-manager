@@ -142,3 +142,48 @@ fn crash_mid_purge_is_finished_when_the_library_opens() {
     s.lib.purge(&s.game, &s.instance).unwrap();
     assert_eq!(fixtures::snapshot(&s.instance.install_path), original);
 }
+
+#[test]
+fn a_stuck_recovery_elsewhere_doesnt_block_this_install() {
+    let mut s = setup();
+    // Another install's interrupted step can't be finished: its "game
+    // folder" is a file, as if the drive held something else now.
+    let elsewhere = s.archives.parent().unwrap().join("not-a-folder");
+    fs::write(&elsewhere, "x").unwrap();
+    let source = s.archives.parent().unwrap().join("source.reds");
+    fs::write(&source, "x").unwrap();
+    s.lib
+        .store()
+        .journal_begin(
+            &JournalEntry {
+                id: 0,
+                instance_id: "cyberpunk2077-other".into(),
+                game_root: elsewhere.to_string_lossy().into_owned(),
+                op: JournalOp::Replace,
+                target: "r6/scripts/x.reds".into(),
+                source: Some(source.to_string_lossy().into_owned()),
+                mod_id: Some("m".into()),
+                revision: Some(1),
+                sha256: None,
+                backup: None,
+                moved_original: false,
+            },
+            0,
+        )
+        .unwrap();
+    let root = s.lib.root().to_path_buf();
+    drop(std::mem::replace(&mut s.lib, Library::open(&root).unwrap()));
+    assert_eq!(s.lib.warnings().len(), 1, "reported, not fatal");
+
+    let archive = fixtures::write_zip(&s.archives.join("Replace.zip"), &replacing_mod());
+    let id = s.instance.id.clone();
+    s.lib
+        .install_archive(&s.game, &archive, ModMeta::default(), Some(&id))
+        .unwrap();
+    s.lib.deploy(&s.game, &s.instance).unwrap();
+    assert_eq!(
+        s.lib.store().pending_journal().unwrap().len(),
+        1,
+        "still waiting"
+    );
+}

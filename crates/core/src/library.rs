@@ -261,7 +261,7 @@ impl Library {
         library.clean_tmp();
         // A recovery that fails now (say, the game's drive isn't mounted) is
         // retried before the next deploy; it mustn't keep the app from starting.
-        library.warnings = library.recover_deployments()?;
+        library.warnings = library.recover_deployments(None)?;
         library.sweep_archives()?;
         Ok(library)
     }
@@ -296,11 +296,15 @@ impl Library {
     }
 
     /// Finishes or undoes deployment steps cut short when the app last
-    /// stopped, so the record matches the game folder again. Returns the
-    /// steps that couldn't be recovered; they stay pending.
-    fn recover_deployments(&mut self) -> Result<Vec<String>> {
+    /// stopped (of one install, or all), so the record matches the game
+    /// folder again. Returns the steps that couldn't be recovered; they stay
+    /// pending.
+    fn recover_deployments(&mut self, instance_id: Option<&str>) -> Result<Vec<String>> {
         let mut failed = Vec::new();
         for entry in self.store.pending_journal()? {
+            if instance_id.is_some_and(|id| id != entry.instance_id) {
+                continue;
+            }
             // Instance ids start with the game id, which says which folders
             // must stay even when empty.
             let protected = crate::game::builtin_games()
@@ -310,7 +314,10 @@ impl Library {
                 .map(|g| protected_dirs(&g))
                 .unwrap_or_default();
             let backups = self.backup_dir(&entry.instance_id);
-            if let Err(e) = deploy::recover(&entry, &backups, &protected, &mut self.store) {
+            let preserved = self.preserved_dir(&entry.instance_id);
+            if let Err(e) =
+                deploy::recover(&entry, &backups, &preserved, &protected, &mut self.store)
+            {
                 failed.push(format!(
                     "An interrupted apply couldn't be finished for {} ({e}). Check that the game folder is reachable; it is retried before the next apply.",
                     entry.target
@@ -1393,7 +1400,7 @@ impl Library {
         };
         // Steps an earlier apply couldn't finish come first, or this one
         // would plan from a game folder the record doesn't describe.
-        let unfinished = self.recover_deployments()?;
+        let unfinished = self.recover_deployments(Some(&instance.id))?;
         if let Some(problem) = unfinished.into_iter().next() {
             return Err(Error::Install(problem));
         }

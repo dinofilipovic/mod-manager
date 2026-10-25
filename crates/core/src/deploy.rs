@@ -169,11 +169,13 @@ pub fn drift(file: &DeployedFile, path: &Path, game_updated_at: Option<i64>) -> 
     if actual.is_some() && actual == file.backup_sha256 {
         return Some(DriftKind::ReplacedByGame);
     }
-    // Written by the game's update: changed after it was placed and no later
-    // than when the update was noticed. Later changes are someone's edit.
+    // A game file a mod replaced, changed no later than a game update that
+    // came after placing it: most likely the update wrote it. Times can't
+    // prove it, so adopting it keeps the old original in the preserved
+    // folder instead of deleting it. Later changes are someone's edit.
     let changed_at = mtime.div_euclid(1_000_000_000);
-    match (game_updated_at, file.placed_at) {
-        (Some(updated), Some(placed)) if placed <= changed_at && changed_at <= updated => {
+    match (file.backup.is_some(), game_updated_at, file.placed_at) {
+        (true, Some(updated), Some(placed)) if placed <= updated && changed_at <= updated => {
             Some(DriftKind::ReplacedByGame)
         }
         _ => Some(DriftKind::Modified),
@@ -328,7 +330,13 @@ fn run(
             store.journal_finish(entry.id, d.instance_id, change)
         }
         Err(e) => {
-            let recovered = recover(&entry, d.backup_root, d.protected_dirs, store);
+            let recovered = recover(
+                &entry,
+                d.backup_root,
+                d.preserved_root,
+                d.protected_dirs,
+                store,
+            );
             let note = match recovered {
                 Ok(()) => "Nothing was lost; fix the problem and apply again.".to_string(),
                 Err(r) => format!("Undoing it also failed ({r}); apply again to retry."),
@@ -410,9 +418,12 @@ fn execute(
             let previous = store
                 .deployed_file(d.instance_id, &entry.target)?
                 .unwrap_or_default();
-            if let Some(backup) = &previous.backup {
-                let backup_path = join_relative(d.backup_root, backup);
-                remove_file_if_exists(&backup_path).map_err(|e| Error::io(&backup_path, e))?;
+            if let Some(kept) = retire_backup(&previous, d.backup_root, d.preserved_root, &path)? {
+                report.preserved.push(kept.clone());
+                report.warnings.push(format!(
+                    "{}: kept the game's new file; the original from before the update is in the preserved folder as {kept}",
+                    entry.target
+                ));
             }
             Ok(None)
         }
@@ -450,6 +461,7 @@ fn placed_record(
 pub fn recover(
     entry: &JournalEntry,
     backup_root: &Path,
+    preserved_root: &Path,
     protected_dirs: &[String],
     store: &mut Store,
 ) -> Result<()> {
@@ -526,10 +538,12 @@ pub fn recover(
             )
         }
         JournalOp::Adopt => {
-            if let Some(backup) = previous.and_then(|p| p.backup) {
-                let backup_path = join_relative(backup_root, &backup);
-                remove_file_if_exists(&backup_path).map_err(io(&backup_path))?;
-            }
+            retire_backup(
+                &previous.unwrap_or_default(),
+                backup_root,
+                preserved_root,
+                &path,
+            )?;
             store.journal_finish(
                 entry.id,
                 &entry.instance_id,
@@ -537,6 +551,33 @@ pub fn recover(
             )
         }
     }
+}
+
+/// Drops the backup of a game file the game itself replaced. A backup equal
+/// to the game's file is deleted; otherwise it is moved to the preserved
+/// folder (returned, relative to it), since only times said it was stale.
+fn retire_backup(
+    previous: &DeployedFile,
+    backup_root: &Path,
+    preserved_root: &Path,
+    path: &Path,
+) -> Result<Option<String>> {
+    let Some(backup) = &previous.backup else {
+        return Ok(None);
+    };
+    let backup_path = join_relative(backup_root, backup);
+    if !backup_path.exists() {
+        return Ok(None);
+    }
+    let same = sha256_file(&backup_path).ok().zip(sha256_file(path).ok());
+    if same.is_some_and(|(a, b)| a == b) {
+        remove_file_if_exists(&backup_path).map_err(|e| Error::io(&backup_path, e))?;
+        return Ok(None);
+    }
+    let kept = format!("{backup}.before-update-{}", crate::library::now());
+    let dest = join_relative(preserved_root, &kept);
+    move_no_clobber(&backup_path, &dest).map_err(|e| Error::io(&dest, e))?;
+    Ok(Some(kept))
 }
 
 fn restore_backup(previous: &DeployedFile, backup_root: &Path, path: &Path) -> Result<()> {
@@ -897,6 +938,13 @@ mod tests {
         assert_eq!(report.adopted, 1);
         assert_eq!(f.read("bin/x64/game.exe"), "patched");
         assert!(!f.backup.join("bin/x64/game.exe").exists());
+        // Only times said the backup was outdated, so it is kept aside.
+        let kept = &report.preserved[0];
+        assert!(
+            kept.starts_with("bin/x64/game.exe.before-update-"),
+            "{kept}"
+        );
+        assert_eq!(fs::read_to_string(f.preserved.join(kept)).unwrap(), "exe");
 
         // The next deploy backs up the patched file as the original.
         f.game_updated_at = None;
@@ -1037,7 +1085,8 @@ mod tests {
         let backup = f.backup.clone();
         let protected = f.protected.clone();
         for pending in f.store.pending_journal().unwrap() {
-            recover(&pending, &backup, &protected, &mut f.store).unwrap();
+            let preserved = f.preserved.clone();
+            recover(&pending, &backup, &preserved, &protected, &mut f.store).unwrap();
         }
         assert!(f.store.pending_journal().unwrap().is_empty());
     }
