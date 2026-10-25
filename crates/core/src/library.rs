@@ -4,8 +4,11 @@
 //! On disk (in the app's data folder):
 //! - `library.db`              SQLite database
 //! - `mods/<mod id>/...`       each mod unpacked in game-folder layout
-//! - `downloads/`              archives downloaded from Nexus
+//! - `downloads/`              archives being downloaded from Nexus
+//! - `archives/<sha256>.<ext>` archives mods were installed from (the archive store)
 //! - `backups/<instance>/...`  original game files replaced by mods
+//! - `preserved/<instance>/..` hand-edited deployed files, copied before being replaced
+//! - `db-backups/`             copies of `library.db` from before migrations and deploys
 //! - `tmp/`                    extraction scratch space
 
 use std::collections::{BTreeMap, HashMap};
@@ -18,6 +21,10 @@ use ts_rs::TS;
 use walkdir::WalkDir;
 
 use crate::archive;
+use crate::archives::{
+    self, ArchiveRecord, ArchiveRetention, ArchiveSource, ArchiveUsage, Hashes, Ingest,
+    ModArchiveSize,
+};
 use crate::deploy::{self, DeployReport, DeploymentCheck, DesiredFile};
 use crate::detect::GameInstance;
 use crate::env::Environment;
@@ -30,7 +37,7 @@ use crate::installer::{self, InstallPlan};
 use crate::nexus::{NexusMatch, parse_archive_name};
 use crate::requirements::{self, FrameworkState, FrameworkStatus, MissingRequirement, ModFiles};
 use crate::saves;
-use crate::store::{ModFile, ModRecord, Profile, ProfileEntry, Store};
+use crate::store::{ModFile, ModRecord, ModRevision, Profile, ProfileEntry, Store};
 
 /// What is known about a mod before installing it.
 #[derive(Debug, Clone, Default)]
@@ -44,6 +51,8 @@ pub struct ModMeta {
     pub nexus_file_id: Option<u32>,
     /// Replace this installed mod (an update) instead of adding a new one.
     pub replaces: Option<String>,
+    /// The archive, when it is already in the archive store.
+    pub archive_id: Option<i64>,
 }
 
 impl From<NexusMatch> for ModMeta {
@@ -57,6 +66,7 @@ impl From<NexusMatch> for ModMeta {
             nexus_mod_id: Some(m.mod_id),
             nexus_file_id: m.file_id,
             replaces: None,
+            archive_id: None,
         }
     }
 }
@@ -133,6 +143,9 @@ pub struct LoadoutMod {
 }
 
 const PROFILE_FORMAT: &str = "mod-manager-profile";
+
+/// Copies of `library.db` kept per reason.
+const DB_BACKUPS_KEPT: usize = 5;
 
 /// A profile written to a file for sharing or moving to another machine.
 #[derive(Debug, Clone, Serialize, serde::Deserialize, TS)]
@@ -231,7 +244,11 @@ impl Library {
             let path = root.join(dir);
             fs::create_dir_all(&path).map_err(|e| Error::io(&path, e))?;
         }
-        let store = Store::open(&root.join("library.db"))?;
+        let db = root.join("library.db");
+        if Store::version_of(&db)?.is_some_and(|v| v < crate::store::SCHEMA_VERSION) {
+            backup_database(root, &db, "pre-migration")?;
+        }
+        let store = Store::open(&db)?;
         let mut library = Self {
             store,
             root: root.to_path_buf(),
@@ -239,7 +256,24 @@ impl Library {
         };
         library.clean_tmp();
         library.recover_deployments()?;
+        library.sweep_archives()?;
         Ok(library)
+    }
+
+    /// Drops archive records whose file is gone and files no record knows.
+    fn sweep_archives(&self) -> Result<()> {
+        let mut known = Vec::new();
+        for a in self.store.archives()? {
+            if self.root.join(&a.path).is_file() {
+                known.push(a.path);
+            } else {
+                self.store.delete_archive(a.id)?;
+            }
+        }
+        for orphan in archives::orphan_files(&self.root, &known) {
+            let _ = fs::remove_file(orphan);
+        }
+        Ok(())
     }
 
     /// Finishes or undoes deployment steps cut short when the app last
@@ -332,6 +366,24 @@ impl Library {
         let archive_name = archive_path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned());
+        // Keep a copy of the user's archive so the mod can be reinstalled.
+        let stored = match meta.archive_id {
+            Some(id) => self.store.archive(id)?,
+            None => None,
+        };
+        let stored = match stored {
+            Some(a) => a,
+            None => self.store_archive(
+                archive_path,
+                archive_name.as_deref(),
+                ArchiveSource::Manual,
+                Ingest::Copy,
+                None,
+                (meta.nexus_mod_id, meta.nexus_file_id),
+            )?,
+        };
+        meta.archive_id = Some(stored.id);
+        let archive_path = &self.root.join(&stored.path);
         if let Some(parsed) = archive_name.as_deref().map(parse_archive_name) {
             meta.name = meta.name.or(Some(parsed.name));
             meta.version = meta.version.or(parsed.version);
@@ -373,6 +425,7 @@ impl Library {
                 meta.clone(),
                 archive_name.clone(),
                 instance_id,
+                None,
             )
             .map(Prepared::Installed)
         })();
@@ -455,6 +508,7 @@ impl Library {
             pending.meta,
             pending.archive_name,
             pending.instance_id.as_deref(),
+            Some(selections.clone()),
         );
         let _ = fs::remove_dir_all(&pending.scratch);
         result
@@ -488,6 +542,7 @@ impl Library {
             .ok_or_else(|| Error::NotFound("this installer (it may have been cancelled)".into()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn install_from_dir(
         &mut self,
         game: &GameDefinition,
@@ -496,6 +551,7 @@ impl Library {
         meta: ModMeta,
         archive_name: Option<String>,
         instance_id: Option<&str>,
+        fomod_choices: Option<fomod::Selections>,
     ) -> Result<InstallOutcome> {
         let name = meta.name.clone().unwrap_or_else(|| "Unnamed mod".into());
 
@@ -542,6 +598,7 @@ impl Library {
         }
         fs::rename(&staging, &final_dir).map_err(|e| Error::io(&final_dir, e))?;
 
+        let archive_id = meta.archive_id;
         let record = ModRecord {
             id: id.clone(),
             game_id: game.id.clone(),
@@ -564,6 +621,15 @@ impl Library {
             update_version: None,
         };
         self.store.insert_mod(&record, &files)?;
+        self.store.insert_revision(&ModRevision {
+            mod_id: id.clone(),
+            revision: record.revision,
+            archive_id,
+            fomod_choices,
+            version: record.version.clone(),
+            installed_at: record.installed_at,
+        })?;
+        self.apply_retention()?;
 
         if existing.is_none()
             && let Some(instance_id) = instance_id
@@ -585,6 +651,189 @@ impl Library {
             warnings: plan.warnings,
             replaced_existing: existing.is_some(),
         })
+    }
+
+    // Archive store
+
+    /// Adds an archive to the archive store (or finds the stored copy with
+    /// the same contents) and returns its record.
+    pub fn store_archive(
+        &self,
+        path: &Path,
+        original_name: Option<&str>,
+        source: ArchiveSource,
+        mode: Ingest,
+        known: Option<Hashes>,
+        (nexus_mod_id, nexus_file_id): (Option<u32>, Option<u32>),
+    ) -> Result<ArchiveRecord> {
+        let (hashes, relative) = archives::put(&self.root, path, original_name, mode, known)?;
+        if let Some(existing) = self.store.archive_by_sha256(&hashes.sha256)? {
+            self.store
+                .link_archive(existing.id, nexus_mod_id, nexus_file_id, original_name)?;
+            return Ok(self.store.archive(existing.id)?.unwrap_or(existing));
+        }
+        let mut record = ArchiveRecord {
+            id: 0,
+            sha256: hashes.sha256,
+            md5: hashes.md5,
+            size: hashes.size,
+            path: relative,
+            original_name: original_name.map(String::from),
+            nexus_mod_id,
+            nexus_file_id,
+            source,
+            added_at: now(),
+        };
+        record.id = self.store.insert_archive(&record)?;
+        Ok(record)
+    }
+
+    pub fn archive_retention(&self) -> ArchiveRetention {
+        ArchiveRetention::parse(
+            self.store
+                .setting("archive_retention")
+                .ok()
+                .flatten()
+                .as_deref(),
+        )
+    }
+
+    pub fn set_archive_retention(&self, retention: ArchiveRetention) -> Result<()> {
+        self.store
+            .set_setting("archive_retention", Some(retention.as_str()))?;
+        self.apply_retention()
+    }
+
+    /// Deletes archives that only older revisions use, per the retention
+    /// setting. Archives no revision uses are left for "clean unused".
+    fn apply_retention(&self) -> Result<()> {
+        let keep = match self.archive_retention() {
+            ArchiveRetention::KeepAll => return Ok(()),
+            ArchiveRetention::LastTwo => 2,
+            ArchiveRetention::DeleteAfterInstall => 0,
+        };
+        let revisions = self.store.all_revisions()?;
+        let mut kept = std::collections::HashSet::new();
+        let mut dropped = std::collections::HashSet::new();
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        // Newest first per mod.
+        for r in &revisions {
+            let n = seen.entry(r.mod_id.as_str()).or_default();
+            if let Some(id) = r.archive_id {
+                if *n < keep {
+                    kept.insert(id);
+                } else {
+                    dropped.insert(id);
+                }
+            }
+            *n += 1;
+        }
+        for id in dropped.difference(&kept) {
+            self.delete_archive(*id)?;
+        }
+        Ok(())
+    }
+
+    fn delete_archive(&self, id: i64) -> Result<()> {
+        if let Some(a) = self.store.archive(id)? {
+            let path = self.root.join(&a.path);
+            crate::fs_util::remove_file_if_exists(&path).map_err(|e| Error::io(&path, e))?;
+        }
+        self.store.delete_archive(id)
+    }
+
+    /// Every stored archive with the mods installed from it.
+    pub fn archive_usage(&self) -> Result<Vec<ArchiveUsage>> {
+        let names: HashMap<String, String> = self.mod_names()?;
+        let revisions = self.store.all_revisions()?;
+        Ok(self
+            .store
+            .archives()?
+            .into_iter()
+            .map(|archive| {
+                let mut mods: Vec<String> = revisions
+                    .iter()
+                    .filter(|r| r.archive_id == Some(archive.id))
+                    .filter_map(|r| names.get(&r.mod_id).cloned())
+                    .collect();
+                mods.dedup();
+                ArchiveUsage {
+                    unused: mods.is_empty(),
+                    mods,
+                    archive,
+                }
+            })
+            .collect())
+    }
+
+    /// Archive disk use per mod, largest first.
+    pub fn mod_archive_sizes(&self) -> Result<Vec<ModArchiveSize>> {
+        let archives: HashMap<i64, u64> = self
+            .store
+            .archives()?
+            .into_iter()
+            .map(|a| (a.id, a.size))
+            .collect();
+        let names = self.mod_names()?;
+        let mut sizes: BTreeMap<String, ModArchiveSize> = BTreeMap::new();
+        let mut counted = std::collections::HashSet::new();
+        for r in self.store.all_revisions()? {
+            let Some(id) = r.archive_id else { continue };
+            let Some(bytes) = archives.get(&id) else {
+                continue;
+            };
+            if !counted.insert((r.mod_id.clone(), id)) {
+                continue;
+            }
+            let entry = sizes
+                .entry(r.mod_id.clone())
+                .or_insert_with(|| ModArchiveSize {
+                    mod_name: names.get(&r.mod_id).cloned().unwrap_or_default(),
+                    mod_id: r.mod_id.clone(),
+                    archives: 0,
+                    bytes: 0,
+                });
+            entry.archives += 1;
+            entry.bytes += bytes;
+        }
+        let mut sizes: Vec<ModArchiveSize> = sizes.into_values().collect();
+        sizes.sort_by_key(|s| std::cmp::Reverse(s.bytes));
+        Ok(sizes)
+    }
+
+    /// Deletes archives no mod revision uses. Returns how many and the bytes freed.
+    pub fn clean_unused_archives(&self) -> Result<(u32, u64)> {
+        let (mut count, mut bytes) = (0, 0);
+        for usage in self.archive_usage()? {
+            if usage.unused {
+                self.delete_archive(usage.archive.id)?;
+                count += 1;
+                bytes += usage.archive.size;
+            }
+        }
+        Ok((count, bytes))
+    }
+
+    /// Total size of the archive store, in bytes.
+    pub fn archives_bytes(&self) -> u64 {
+        self.store
+            .archives()
+            .map(|a| a.iter().map(|a| a.size).sum())
+            .unwrap_or(0)
+    }
+
+    pub fn revisions(&self, mod_id: &str) -> Result<Vec<ModRevision>> {
+        self.store.revisions(mod_id)
+    }
+
+    fn mod_names(&self) -> Result<HashMap<String, String>> {
+        let mut names = HashMap::new();
+        for game in crate::game::builtin_games().unwrap_or_default() {
+            for m in self.store.mods_for_game(&game.id)? {
+                names.insert(m.id, m.name);
+            }
+        }
+        Ok(names)
     }
 
     /// Removes a mod from the library and all profiles. Its files leave the
@@ -1110,6 +1359,7 @@ impl Library {
             self.store
                 .observe_game(&instance.id, &instance.fingerprint, now())?
         };
+        backup_database(&self.root, &self.root.join("library.db"), "pre-deploy")?;
         let protected = protected_dirs(game);
         let backups = self.backup_dir(&instance.id);
         let preserved = self.preserved_dir(&instance.id);
@@ -1387,6 +1637,33 @@ impl Library {
             .map(|m| m.len())
             .sum()
     }
+}
+
+/// Copies the database to `db-backups/<reason>-<time>.db`, keeping the
+/// newest few per reason.
+fn backup_database(root: &Path, db: &Path, reason: &str) -> Result<()> {
+    let dir = root.join("db-backups");
+    fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let dest = dir.join(format!("{reason}-{stamp:015}.db"));
+    Store::backup_file(db, &dest)?;
+    let mut existing: Vec<PathBuf> = fs::read_dir(&dir)
+        .map_err(|e| Error::io(&dir, e))?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(&format!("{reason}-")))
+        })
+        .collect();
+    existing.sort();
+    let excess = existing.len().saturating_sub(DB_BACKUPS_KEPT);
+    for old in &existing[..excess] {
+        let _ = fs::remove_file(old);
+    }
+    Ok(())
 }
 
 /// Folders mods are dropped into stay even when empty; a framework's own
@@ -1733,6 +2010,157 @@ mod tests {
                 .iter()
                 .any(|m| m.record.id == installed.record.id && m.enabled)
         );
+    }
+
+    #[test]
+    fn archives_are_stored_deduplicated_and_retained() {
+        let mut f = fixture();
+        let id = f.instance.id.clone();
+        let v1 = zip(&f, "Mod-5-1-0-1700000000.zip", &[("a.archive", "1")]);
+        let first = f
+            .lib
+            .install_archive(&f.game, &v1, ModMeta::default(), Some(&id))
+            .unwrap();
+        assert!(v1.exists(), "the user's archive is left where it was");
+        let archives = f.lib.archive_usage().unwrap();
+        assert_eq!(archives.len(), 1);
+        assert_eq!(archives[0].mods, ["Mod"]);
+        assert_eq!(archives[0].archive.source, ArchiveSource::Manual);
+        assert!(f.lib.root().join(&archives[0].archive.path).is_file());
+
+        // The same bytes again are stored once.
+        let copy = f.archives.join("copy.zip");
+        fs::copy(&v1, &copy).unwrap();
+        let duplicate = f
+            .lib
+            .install_archive(&f.game, &copy, ModMeta::default(), Some(&id))
+            .unwrap();
+        assert_eq!(f.lib.archive_usage().unwrap().len(), 1);
+        assert_eq!(f.lib.archive_usage().unwrap()[0].mods.len(), 2);
+        f.lib.remove_mod(&duplicate.record.id).unwrap();
+
+        // Updates write revisions; only the last two keep their archives.
+        for (n, data) in [(2, "2"), (3, "3")] {
+            let archive = zip(&f, &format!("v{n}.zip"), &[("a.archive", data)]);
+            let meta = ModMeta {
+                replaces: Some(first.record.id.clone()),
+                version: Some(format!("{n}.0")),
+                ..Default::default()
+            };
+            f.lib
+                .install_archive(&f.game, &archive, meta, Some(&id))
+                .unwrap();
+        }
+        let revisions = f.lib.revisions(&first.record.id).unwrap();
+        assert_eq!(
+            revisions.iter().map(|r| r.revision).collect::<Vec<_>>(),
+            [3, 2, 1]
+        );
+        assert_eq!(revisions[0].version.as_deref(), Some("3.0"));
+        assert!(revisions[0].archive_id.is_some() && revisions[1].archive_id.is_some());
+        assert_eq!(
+            revisions[2].archive_id, None,
+            "the oldest archive was deleted"
+        );
+        let sizes = f.lib.mod_archive_sizes().unwrap();
+        let mine = sizes.iter().find(|s| s.mod_id == first.record.id).unwrap();
+        assert_eq!(mine.archives, 2);
+
+        f.lib.remove_mod(&first.record.id).unwrap();
+        let (count, bytes) = f.lib.clean_unused_archives().unwrap();
+        assert!(count >= 2 && bytes > 0);
+        assert!(f.lib.archive_usage().unwrap().iter().all(|a| !a.unused));
+
+        f.lib
+            .set_archive_retention(ArchiveRetention::DeleteAfterInstall)
+            .unwrap();
+        assert!(f.lib.archive_usage().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fomod_choices_are_recorded_per_revision() {
+        let mut f = fixture();
+        let id = f.instance.id.clone();
+        let config = r#"<config><moduleName>Pick</moduleName><installSteps><installStep name="S">
+            <optionalFileGroups><group name="G" type="SelectExactlyOne"><plugins>
+              <plugin name="A"><description/><files><file source="a.archive" destination="archive/pc/mod/a.archive"/></files><typeDescriptor><type name="Optional"/></typeDescriptor></plugin>
+              <plugin name="B"><description/><files><file source="b.archive" destination="archive/pc/mod/b.archive"/></files><typeDescriptor><type name="Optional"/></typeDescriptor></plugin>
+            </plugins></group></optionalFileGroups></installStep></installSteps></config>"#;
+        let archive = zip(
+            &f,
+            "Pick.zip",
+            &[
+                ("fomod/ModuleConfig.xml", config),
+                ("a.archive", "A"),
+                ("b.archive", "B"),
+            ],
+        );
+        let Prepared::NeedsChoices(request) = f
+            .lib
+            .prepare_archive(&f.game, &archive, ModMeta::default(), Some(&id))
+            .unwrap()
+        else {
+            panic!("expected the installer to ask");
+        };
+        let choose_b = fomod::Selections(vec![vec![vec![1]]]);
+        let outcome = f
+            .lib
+            .finish_fomod(&f.game, &request.token, &choose_b)
+            .unwrap();
+        let revision = &f.lib.revisions(&outcome.record.id).unwrap()[0];
+        assert_eq!(revision.fomod_choices.as_ref(), Some(&choose_b));
+        assert!(revision.archive_id.is_some());
+    }
+
+    #[test]
+    fn sweeps_orphaned_archives_and_backs_up_the_database() {
+        let mut f = fixture();
+        let id = f.instance.id.clone();
+        let a = zip(&f, "a.zip", &[("a.archive", "A")]);
+        f.lib
+            .install_archive(&f.game, &a, ModMeta::default(), Some(&id))
+            .unwrap();
+        for _ in 0..7 {
+            f.lib.deploy(&f.game, &f.instance).unwrap();
+        }
+        let backups: Vec<_> = fs::read_dir(f.lib.root().join("db-backups"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(backups.len(), DB_BACKUPS_KEPT, "only the newest are kept");
+
+        let root = f.lib.root().to_path_buf();
+        fs::write(root.join("archives/stray.zip"), "x").unwrap();
+        let stored = root.join(&f.lib.archive_usage().unwrap()[0].archive.path);
+        fs::remove_file(&stored).unwrap();
+        let lib = Library::open(&root).unwrap();
+        assert!(!root.join("archives/stray.zip").exists());
+        assert!(
+            lib.archive_usage().unwrap().is_empty(),
+            "missing file, record dropped"
+        );
+    }
+
+    #[test]
+    fn backs_up_the_database_before_migrating() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        fs::create_dir_all(&root).unwrap();
+        {
+            let conn = rusqlite::Connection::open(root.join("library.db")).unwrap();
+            conn.execute_batch(crate::store::BASE_SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+        }
+        Library::open(&root).unwrap();
+        let backups: Vec<String> = fs::read_dir(root.join("db-backups"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert!(backups[0].starts_with("pre-migration-"));
+        let copy = root.join("db-backups").join(&backups[0]);
+        assert_eq!(crate::store::Store::version_of(&copy).unwrap(), Some(2));
     }
 
     #[test]

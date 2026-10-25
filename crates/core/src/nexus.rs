@@ -270,14 +270,14 @@ impl NexusClient {
     }
 
     /// Downloads `url` to `dest`, calling `progress(done, total)` as bytes
-    /// arrive. Writes to a `.part` file first so a failed download never
-    /// looks complete.
+    /// arrive, and hashes the bytes on the way. Writes to a `.part` file
+    /// first so a failed download never looks complete.
     pub fn download(
         &self,
         url: &str,
         dest: &Path,
         mut progress: impl FnMut(u64, Option<u64>),
-    ) -> Result<()> {
+    ) -> Result<crate::archives::Hashes> {
         let mut response = self
             .http
             .get(url)
@@ -289,6 +289,7 @@ impl NexusClient {
         let mut file = fs::File::create(&part).map_err(|e| Error::io(&part, e))?;
         let mut buffer = vec![0u8; 256 * 1024];
         let mut done = 0u64;
+        let mut hasher = crate::archives::Hasher::default();
         loop {
             let n = response
                 .read(&mut buffer)
@@ -298,6 +299,7 @@ impl NexusClient {
             }
             file.write_all(&buffer[..n])
                 .map_err(|e| Error::io(&part, e))?;
+            hasher.update(&buffer[..n]);
             done += n as u64;
             progress(done, total);
         }
@@ -308,7 +310,7 @@ impl NexusClient {
             return Err(Error::Nexus("download ended early; try again".into()));
         }
         fs::rename(&part, dest).map_err(|e| Error::io(dest, e))?;
-        Ok(())
+        Ok(hasher.finish())
     }
 }
 

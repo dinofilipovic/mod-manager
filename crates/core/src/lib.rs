@@ -3,6 +3,7 @@
 //! and shared by the CLI and the desktop app.
 
 pub mod archive;
+pub mod archives;
 pub mod collections;
 pub mod deploy;
 pub mod detect;

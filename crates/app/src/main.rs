@@ -114,6 +114,9 @@ fn main() {
             commands::import_profile,
             commands::open_collection,
             commands::install_collection,
+            commands::archives_info,
+            commands::set_archive_retention,
+            commands::clean_unused_archives,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start the app");

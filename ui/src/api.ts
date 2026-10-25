@@ -5,6 +5,9 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { AppInfo } from "./bindings/AppInfo";
+import type { ArchiveRetention } from "./bindings/ArchiveRetention";
+import type { ArchivesInfo } from "./bindings/ArchivesInfo";
+import type { CleanResult } from "./bindings/CleanResult";
 import type { DeployReport } from "./bindings/DeployReport";
 import type { Download } from "./bindings/Download";
 import type { GameDefinition } from "./bindings/GameDefinition";
@@ -84,6 +87,10 @@ export const api = {
   exportProfile: (instanceId: string, profileId: string, path: string) =>
     invoke<void>("export_profile", { instanceId, profileId, path }),
   importProfile: (instanceId: string, path: string) => invoke<ImportReport>("import_profile", { instanceId, path }),
+
+  archivesInfo: () => invoke<ArchivesInfo>("archives_info"),
+  setArchiveRetention: (retention: ArchiveRetention) => invoke<ArchivesInfo>("set_archive_retention", { retention }),
+  cleanUnusedArchives: () => invoke<CleanResult>("clean_unused_archives"),
 
   openCollection: (link: string) => invoke<Collection>("open_collection", { link }),
   installCollection: (gameDomain: string, files: [number, number][]) =>

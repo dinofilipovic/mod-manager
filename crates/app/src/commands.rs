@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 
+use mm_core::archives::{ArchiveRetention, ModArchiveSize};
 use mm_core::collections::{self, Collection};
 use mm_core::deploy::DeployReport;
 use mm_core::fomod::Selections;
@@ -59,7 +60,31 @@ pub struct AppInfo {
     pub data_dir: String,
     #[ts(type = "number")]
     pub library_bytes: u64,
+    /// Size of the archive store.
+    #[ts(type = "number")]
+    pub archives_bytes: u64,
     pub crossover_installed: bool,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ArchivesInfo {
+    pub retention: ArchiveRetention,
+    #[ts(type = "number")]
+    pub total_bytes: u64,
+    pub unused_count: u32,
+    #[ts(type = "number")]
+    pub unused_bytes: u64,
+    /// Largest first.
+    pub mods: Vec<ModArchiveSize>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct CleanResult {
+    pub deleted: u32,
+    #[ts(type = "number")]
+    pub bytes: u64,
 }
 
 /// The result of a library change: the fresh loadout.
@@ -104,6 +129,7 @@ pub async fn app_info(app: AppHandle) -> CommandResult<AppInfo> {
             version: env!("CARGO_PKG_VERSION").into(),
             data_dir: library.root().display().to_string(),
             library_bytes: library.disk_usage(),
+            archives_bytes: library.archives_bytes(),
             crossover_installed: mm_core::env::runner::crossover_wine().is_some(),
         })
     })
@@ -707,6 +733,50 @@ pub async fn cancel_fomod(app: AppHandle, token: String) -> CommandResult<()> {
             });
         }
         Ok(())
+    })
+    .await
+}
+
+// Archive store
+
+fn archives_info_of(library: &mm_core::library::Library) -> CommandResult<ArchivesInfo> {
+    let usage = library.archive_usage().map_err(err)?;
+    Ok(ArchivesInfo {
+        retention: library.archive_retention(),
+        total_bytes: usage.iter().map(|u| u.archive.size).sum(),
+        unused_count: usage.iter().filter(|u| u.unused).count() as u32,
+        unused_bytes: usage
+            .iter()
+            .filter(|u| u.unused)
+            .map(|u| u.archive.size)
+            .sum(),
+        mods: library.mod_archive_sizes().map_err(err)?,
+    })
+}
+
+#[tauri::command]
+pub async fn archives_info(app: AppHandle) -> CommandResult<ArchivesInfo> {
+    blocking(app, |_, state| archives_info_of(&lock(&state.library))).await
+}
+
+#[tauri::command]
+pub async fn set_archive_retention(
+    app: AppHandle,
+    retention: ArchiveRetention,
+) -> CommandResult<ArchivesInfo> {
+    blocking(app, move |_, state| {
+        let library = lock(&state.library);
+        library.set_archive_retention(retention).map_err(err)?;
+        archives_info_of(&library)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn clean_unused_archives(app: AppHandle) -> CommandResult<CleanResult> {
+    blocking(app, |_, state| {
+        let (deleted, bytes) = lock(&state.library).clean_unused_archives().map_err(err)?;
+        Ok(CleanResult { deleted, bytes })
     })
     .await
 }

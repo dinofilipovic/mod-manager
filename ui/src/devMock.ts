@@ -136,6 +136,19 @@ let mods: LoadoutMod[] = [
   { mod: mod("hud", "Immersive HUD", ["cet", "redscript"], { version: "0.9" }), enabled: true, overrides: [], overridden_by: [], conflict_files: 0, missing_requirements: [{ framework_id: "redscript", name: "redscript", nexus_mod_id: 1511, disabled_mod_id: null }] },
   { mod: mod("redmod", "Night City Radio Expanded", ["redmod"]), enabled: true, overrides: [], overridden_by: [], conflict_files: 0, missing_requirements: [] },
 ];
+let retention: "KeepAll" | "LastTwo" | "DeleteAfterInstall" = "LastTwo";
+let unusedArchiveBytes = 412_000_000;
+const archivesInfo = () => ({
+  retention,
+  total_bytes: 2_150_000_000,
+  unused_count: unusedArchiveBytes ? 3 : 0,
+  unused_bytes: unusedArchiveBytes,
+  mods: [
+    { mod_id: "m3", mod_name: "Cyberpunk HD Reworked", archives: 2, bytes: 1_380_000_000 },
+    { mod_id: "m1", mod_name: "Cyber Engine Tweaks", archives: 2, bytes: 48_000_000 },
+    { mod_id: "m2", mod_name: "Immersive HUD", archives: 1, bytes: 1_200_000 },
+  ],
+});
 let pending = true;
 let archiveOrder: "ByFileName" | "ByList" = "ByFileName";
 
@@ -213,7 +226,23 @@ export function installDevMock() {
         case "list_downloads":
           return downloads;
         case "app_info":
-          return { version: "0.1.0", data_dir: "/Users/demo/Library/Application Support/ModManager", library_bytes: 4_300_000_000, crossover_installed: true };
+          return {
+            version: "0.1.0",
+            data_dir: "/Users/demo/Library/Application Support/ModManager",
+            library_bytes: 4_300_000_000,
+            archives_bytes: 2_150_000_000,
+            crossover_installed: true,
+          };
+        case "archives_info":
+          return archivesInfo();
+        case "set_archive_retention":
+          retention = a.retention as typeof retention;
+          return archivesInfo();
+        case "clean_unused_archives": {
+          const freed = unusedArchiveBytes;
+          unusedArchiveBytes = 0;
+          return { deleted: freed ? 3 : 0, bytes: freed };
+        }
         case "set_archive_order":
           archiveOrder = a.order as typeof archiveOrder;
           pending = true;

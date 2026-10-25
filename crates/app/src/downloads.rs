@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 
+use mm_core::archives::{ArchiveSource, Ingest};
 use mm_core::installer::sanitize_folder_name;
 use mm_core::library::{ModMeta, Prepared};
 use mm_core::nexus::{self, Download, DownloadStatus, NexusClient};
@@ -125,7 +126,7 @@ fn run(
         .unwrap_or_else(|| format!("{}-{}-{}.zip", name, request.mod_id, request.file_id));
     let dest = dest_dir.join(sanitize_folder_name(&file_name));
     let mut last_emit = Instant::now();
-    client
+    let hashes = client
         .download(&url, &dest, |done, total| {
             if last_emit.elapsed() > Duration::from_millis(200) {
                 last_emit = Instant::now();
@@ -147,6 +148,17 @@ fn run(
         .and_then(|d| d.instance_id.clone());
 
     let mut library = lock(&state.library);
+    // Kept in the archive store, so the mod can be reinstalled or rolled back.
+    let stored = library
+        .store_archive(
+            &dest,
+            Some(&file_name),
+            ArchiveSource::Nexus,
+            Ingest::Move,
+            Some(hashes),
+            (Some(request.mod_id), Some(request.file_id)),
+        )
+        .map_err(err)?;
     // A download that is the pending update of an installed mod replaces it.
     let replaces = request.replaces.or_else(|| {
         library
@@ -167,12 +179,11 @@ fn run(
         nexus_mod_id: Some(request.mod_id),
         nexus_file_id: Some(request.file_id),
         replaces,
+        archive_id: Some(stored.id),
     };
     let prepared = library
         .prepare_archive(game, &dest, meta, instance_id.as_deref())
         .map_err(err);
-    // The archive is no longer needed once unpacked.
-    let _ = std::fs::remove_file(&dest);
     match prepared? {
         Prepared::Installed(outcome) => Ok(DownloadStatus::Done {
             mod_id: outcome.record.id,

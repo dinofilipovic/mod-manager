@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, errorMessage, nexusUrls, openExternal, reveal, withTimeout } from "../api";
 import type { AppInfo } from "../bindings/AppInfo";
+import type { ArchiveRetention } from "../bindings/ArchiveRetention";
+import type { ArchivesInfo } from "../bindings/ArchivesInfo";
 import type { NexusStatus } from "../bindings/NexusStatus";
 import { Icon } from "../components/Icon";
 import { useToast } from "../components/Toasts";
@@ -28,11 +30,45 @@ export function SettingsView({
   const [connect, setConnect] = useState<Connect>({ phase: "idle" });
   const [justConnected, setJustConnected] = useState(false);
   const [info, setInfo] = useState<AppInfo | null>(null);
+  const [archives, setArchives] = useState<ArchivesInfo | null>(null);
+  const [archiveBusy, setArchiveBusy] = useState<string | null>(null);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
   const [, tick] = useState(0);
 
   useEffect(() => {
     void api.appInfo().then(setInfo);
+    api.archivesInfo().then(setArchives, (e) => setArchiveError(errorMessage(e)));
   }, []);
+
+  const archiveAction = async (label: string, work: () => Promise<void>) => {
+    setArchiveBusy(label);
+    setArchiveError(null);
+    try {
+      await work();
+    } catch (e) {
+      setArchiveError(errorMessage(e));
+    } finally {
+      setArchiveBusy(null);
+    }
+  };
+
+  const setRetention = (retention: ArchiveRetention) =>
+    archiveAction("retention", async () => {
+      setArchives(await api.setArchiveRetention(retention));
+      setInfo(await api.appInfo());
+    });
+
+  const cleanArchives = () =>
+    archiveAction("clean", async () => {
+      const result = await api.cleanUnusedArchives();
+      setArchives(await api.archivesInfo());
+      setInfo(await api.appInfo());
+      toast(
+        "success",
+        result.deleted ? `Deleted ${result.deleted} unused archives` : "No unused archives",
+        result.deleted ? `${formatBytes(result.bytes)} freed.` : undefined,
+      );
+    });
 
   // Re-render every second while checking, to show how long it has taken.
   useEffect(() => {
@@ -200,12 +236,78 @@ export function SettingsView({
           </dd>
           <dt>Mods size</dt>
           <dd>{info ? formatBytes(info.library_bytes) : "…"}</dd>
+          <dt>Archives size</dt>
+          <dd>{info ? formatBytes(info.archives_bytes) : "…"}</dd>
           <dt>Deployment</dt>
           <dd>
             Copy-on-write clones where the disk supports it (APFS, Btrfs, XFS, ReFS), so deployed mods take no extra
             space. Hard links or copies otherwise.
           </dd>
         </dl>
+      </section>
+
+      <section className="card" aria-busy={archiveBusy !== null}>
+        <div className="card-head-row">
+          <h2>Mod archives</h2>
+          <button
+            onClick={cleanArchives}
+            disabled={archiveBusy !== null || !archives || archives.unused_count === 0}
+            title="Delete archives that no installed mod was installed from"
+          >
+            <Icon name="trash" />{" "}
+            {archiveBusy === "clean"
+              ? "Cleaning…"
+              : archives?.unused_count
+                ? `Clean ${archives.unused_count} unused (${formatBytes(archives.unused_bytes)})`
+                : "Clean unused"}
+          </button>
+        </div>
+        <p className="muted small">
+          The archives mods were installed from, kept so a mod can be reinstalled, rolled back or installed with other
+          options without downloading it again.
+        </p>
+        <label className="field-row">
+          <span>Keep</span>
+          <select
+            value={archives?.retention ?? "LastTwo"}
+            disabled={!archives || archiveBusy !== null}
+            onChange={(e) => void setRetention(e.target.value as ArchiveRetention)}
+          >
+            <option value="KeepAll">All archives</option>
+            <option value="LastTwo">The last 2 per mod (enough to roll back)</option>
+            <option value="DeleteAfterInstall">None: delete after installing</option>
+          </select>
+        </label>
+        {archiveError && (
+          <div className="notice notice-error" role="alert">
+            <Icon name="alert" />
+            <div>
+              <strong>Couldn't change the archives</strong>
+              <p>{archiveError} Check that the library folder is writable, then try again.</p>
+            </div>
+          </div>
+        )}
+        {archives && archives.mods.length > 0 && (
+          <table className="size-table">
+            <thead>
+              <tr>
+                <th>Mod</th>
+                <th>Archives</th>
+                <th>Size</th>
+              </tr>
+            </thead>
+            <tbody>
+              {archives.mods.slice(0, 12).map((m) => (
+                <tr key={m.mod_id}>
+                  <td>{m.mod_name}</td>
+                  <td>{m.archives}</td>
+                  <td>{formatBytes(m.bytes)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {archives && archives.mods.length === 0 && <p className="muted small">No archives stored yet.</p>}
       </section>
 
       <section className="card">

@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use ts_rs::TS;
 
+use crate::archives::{ArchiveRecord, ArchiveSource};
 use crate::error::Result;
 
 pub const SCHEMA_VERSION: i32 = 3;
@@ -272,6 +273,22 @@ pub enum DeployedChange<'a> {
     Nothing,
 }
 
+/// One install of a mod: which archive it came from and the installer
+/// options chosen, so it can be installed again exactly.
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct ModRevision {
+    pub mod_id: String,
+    pub revision: u32,
+    /// `None` once the archive was deleted (retention or cleanup).
+    #[ts(type = "number | null")]
+    pub archive_id: Option<i64>,
+    pub fomod_choices: Option<crate::fomod::Selections>,
+    pub version: Option<String>,
+    #[ts(type = "number")]
+    pub installed_at: i64,
+}
+
 /// A mod file with its size and hash, recorded at install.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModFile {
@@ -327,10 +344,11 @@ impl Store {
         Ok((version > 0).then_some(version))
     }
 
-    /// Writes a consistent copy of the database to `dest`.
-    pub fn backup_to(&self, dest: &Path) -> Result<()> {
-        self.conn
-            .execute("VACUUM INTO ?1", [dest.to_string_lossy()])?;
+    /// Writes a consistent copy of the database file at `src` to `dest`,
+    /// including what is still in its write-ahead log, without migrating it.
+    pub fn backup_file(src: &Path, dest: &Path) -> Result<()> {
+        let conn = Connection::open(src)?;
+        conn.execute("VACUUM INTO ?1", [dest.to_string_lossy()])?;
         Ok(())
     }
 
@@ -788,6 +806,118 @@ impl Store {
         }
     }
 
+    // Archive store
+
+    pub fn insert_archive(&self, a: &ArchiveRecord) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO archives (sha256, md5, size, path, original_name, nexus_mod_id, nexus_file_id,
+                source, added_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                a.sha256,
+                a.md5,
+                a.size as i64,
+                a.path,
+                a.original_name,
+                a.nexus_mod_id,
+                a.nexus_file_id,
+                a.source.as_str(),
+                a.added_at
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Fills in the Nexus file of an archive when it wasn't known yet.
+    pub fn link_archive(
+        &self,
+        id: i64,
+        nexus_mod_id: Option<u32>,
+        nexus_file_id: Option<u32>,
+        original_name: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE archives SET nexus_mod_id = COALESCE(nexus_mod_id, ?2),
+                nexus_file_id = COALESCE(nexus_file_id, ?3),
+                original_name = COALESCE(original_name, ?4) WHERE id = ?1",
+            params![id, nexus_mod_id, nexus_file_id, original_name],
+        )?;
+        Ok(())
+    }
+
+    pub fn archive(&self, id: i64) -> Result<Option<ArchiveRecord>> {
+        Ok(self
+            .conn
+            .query_row("SELECT * FROM archives WHERE id = ?1", [id], row_to_archive)
+            .optional()?)
+    }
+
+    pub fn archive_by_sha256(&self, sha256: &str) -> Result<Option<ArchiveRecord>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT * FROM archives WHERE sha256 = ?1",
+                [sha256],
+                row_to_archive,
+            )
+            .optional()?)
+    }
+
+    pub fn archives(&self) -> Result<Vec<ArchiveRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM archives ORDER BY added_at, id")?;
+        let rows = stmt.query_map([], row_to_archive)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn delete_archive(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM archives WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    // Revisions
+
+    pub fn insert_revision(&self, r: &ModRevision) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO mod_revisions (mod_id, revision, archive_id, fomod_choices, version, installed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(mod_id, revision) DO UPDATE SET archive_id = ?3, fomod_choices = ?4,
+                version = ?5, installed_at = ?6",
+            params![
+                r.mod_id,
+                r.revision,
+                r.archive_id,
+                r.fomod_choices
+                    .as_ref()
+                    .and_then(|c| serde_json::to_string(c).ok()),
+                r.version,
+                r.installed_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A mod's revisions, newest first.
+    pub fn revisions(&self, mod_id: &str) -> Result<Vec<ModRevision>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT mod_id, revision, archive_id, fomod_choices, version, installed_at
+             FROM mod_revisions WHERE mod_id = ?1 ORDER BY revision DESC",
+        )?;
+        let rows = stmt.query_map([mod_id], row_to_revision)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every revision of every mod (for working out which archives are used).
+    pub fn all_revisions(&self) -> Result<Vec<ModRevision>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT mod_id, revision, archive_id, fomod_choices, version, installed_at
+             FROM mod_revisions ORDER BY mod_id, revision DESC",
+        )?;
+        let rows = stmt.query_map([], row_to_revision)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     // Settings
 
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
@@ -809,6 +939,33 @@ impl Store {
         };
         Ok(())
     }
+}
+
+fn row_to_archive(r: &rusqlite::Row) -> rusqlite::Result<ArchiveRecord> {
+    Ok(ArchiveRecord {
+        id: r.get("id")?,
+        sha256: r.get("sha256")?,
+        md5: r.get("md5")?,
+        size: r.get::<_, i64>("size")? as u64,
+        path: r.get("path")?,
+        original_name: r.get("original_name")?,
+        nexus_mod_id: r.get("nexus_mod_id")?,
+        nexus_file_id: r.get("nexus_file_id")?,
+        source: ArchiveSource::parse(&r.get::<_, String>("source")?),
+        added_at: r.get("added_at")?,
+    })
+}
+
+fn row_to_revision(r: &rusqlite::Row) -> rusqlite::Result<ModRevision> {
+    let choices: Option<String> = r.get(3)?;
+    Ok(ModRevision {
+        mod_id: r.get(0)?,
+        revision: r.get(1)?,
+        archive_id: r.get(2)?,
+        fomod_choices: choices.and_then(|c| serde_json::from_str(&c).ok()),
+        version: r.get(4)?,
+        installed_at: r.get(5)?,
+    })
 }
 
 fn row_to_deployed(r: &rusqlite::Row) -> rusqlite::Result<DeployedFile> {
