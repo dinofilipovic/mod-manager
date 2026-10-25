@@ -165,6 +165,23 @@ pub struct DependencyReport {
     pub cycles: Vec<Vec<String>>,
 }
 
+/// What a requirement points at once a Nexus mod that is one of the game's
+/// frameworks is read as that framework.
+pub fn normalized_target(
+    game: &GameDefinition,
+    kind: DependencyKind,
+    target: &str,
+) -> (DependencyKind, String) {
+    let framework = (kind == DependencyKind::NexusMod)
+        .then(|| target.parse::<u32>().ok())
+        .flatten()
+        .and_then(|id| game.frameworks.iter().find(|f| f.nexus_mod_id == Some(id)));
+    match framework {
+        Some(f) => (DependencyKind::Framework, f.id.clone()),
+        None => (kind, target.to_string()),
+    }
+}
+
 /// Checks every requirement: the recorded ones (`recorded`) and the
 /// frameworks each mod needs by the game's rules (`needs`). The same thing
 /// required from several sources is listed once.
@@ -178,16 +195,7 @@ pub fn resolve(
     let by_id: HashMap<&str, &ModNode> = mods.iter().map(|m| (m.id, m)).collect();
     // A Nexus mod that is one of the game's frameworks is that framework.
     let normalize = |mut d: Dependency| {
-        if d.kind == DependencyKind::NexusMod
-            && let Some(f) = d
-                .target
-                .parse::<u32>()
-                .ok()
-                .and_then(|id| game.frameworks.iter().find(|f| f.nexus_mod_id == Some(id)))
-        {
-            d.kind = DependencyKind::Framework;
-            d.target = f.id.clone();
-        }
+        (d.kind, d.target) = normalized_target(game, d.kind, &d.target);
         d
     };
     let rules = needs.iter().flat_map(|(mod_id, wanted)| {

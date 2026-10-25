@@ -1340,12 +1340,15 @@ impl Library {
             .store
             .get_mod(mod_id)?
             .ok_or_else(|| Error::NotFound(format!("mod {mod_id}")))?;
+        // The list shows a Nexus id of a framework as the framework.
+        let game = crate::game::find_builtin(&record.game_id)?;
+        let wanted = dependencies::normalized_target(&game, kind, target);
         let deps: Vec<_> = self
             .store
             .dependencies(&record.game_id)?
             .into_iter()
             .filter(|d| d.mod_id == mod_id && d.source == DependencySource::User)
-            .filter(|d| !(d.kind == kind && d.target == target))
+            .filter(|d| dependencies::normalized_target(&game, d.kind, &d.target) != wanted)
             .collect();
         self.store
             .set_dependencies(mod_id, DependencySource::User, &deps)

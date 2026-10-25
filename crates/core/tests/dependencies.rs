@@ -195,5 +195,27 @@ fn user_requirements_and_cycles() {
         .unwrap();
     let loadout = w.lib.loadout(&w.game, &w.instance).unwrap();
     assert!(loadout.dependency_cycles.is_empty());
+
+    // A Nexus id of a framework shows as the framework and is removed as shown.
+    w.lib
+        .add_user_dependency(&a, DependencyKind::NexusMod, "2380", false)
+        .unwrap();
+    let shown = w.lib.loadout(&w.game, &w.instance).unwrap();
+    let red4ext = shown
+        .mods
+        .iter()
+        .find(|m| m.record.id == a)
+        .unwrap()
+        .requires
+        .iter()
+        .find(|d| d.name == "RED4ext")
+        .unwrap()
+        .clone();
+    assert_eq!((red4ext.kind, red4ext.target.as_str()), (DependencyKind::Framework, "red4ext"));
+    w.lib
+        .remove_user_dependency(&a, red4ext.kind, &red4ext.target)
+        .unwrap();
+    let after = w.lib.loadout(&w.game, &w.instance).unwrap();
+    assert!(!after.mods.iter().find(|m| m.record.id == a).unwrap().requires.iter().any(|d| d.name == "RED4ext"));
     assert_eq!(w.lib.dependents(&w.game, &w.instance, &b).unwrap(), ["A"]);
 }

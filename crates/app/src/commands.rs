@@ -1274,16 +1274,13 @@ pub async fn get_missing(app: AppHandle, instance_id: String) -> CommandResult<U
             }
         }
         // Without an account (or a Premium one) the pages are the way.
-        let premium = match nexus::api_key::load().ok().flatten() {
-            Some(key) => nexus_client(&key)?
-                .validate()
-                .map(|u| u.is_premium)
-                .unwrap_or(false),
-            None => false,
-        };
-        let client = match nexus::api_key::load().ok().flatten() {
-            Some(key) if premium => Some(nexus_client(&key)?),
-            _ => None,
+        let client = match nexus::api_key::load().map_err(err)? {
+            Some(key) => {
+                let client = nexus_client(&key)?;
+                let premium = client.validate().map_err(err)?.is_premium;
+                premium.then_some(client)
+            }
+            None => None,
         };
         let mut result = UpdateAllResult {
             queued: 0,
