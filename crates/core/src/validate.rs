@@ -75,7 +75,11 @@ pub fn check_mod(
                 .filter(|c| c.extensions.iter().any(|e| e.eq_ignore_ascii_case(&ext)))
             {
                 if let Err(problem) = run_file_check(&check.checker, &path) {
-                    results.push(error(&check.checker, target, format!("{target} {problem}")));
+                    let mut result = error(&check.checker, target, format!("{target} {problem}"));
+                    if check.warning_only {
+                        result.severity = CheckSeverity::Warning;
+                    }
+                    results.push(result);
                 }
             }
         }
@@ -375,6 +379,11 @@ mod tests {
         assert_eq!(count("archive_header"), 1);
         assert_eq!(count("yaml"), 2, "the .xl and the tweak");
         assert_eq!(count("json"), 1);
+        assert_eq!(
+            results.iter().find(|r| r.check == "json").unwrap().severity,
+            CheckSeverity::Warning,
+            "a CET mod's settings file doesn't stop it loading"
+        );
         assert_eq!(count("pe64_dll"), 3, "32-bit, not a DLL, not a PE file");
         assert_eq!(
             count("lua_entry"),

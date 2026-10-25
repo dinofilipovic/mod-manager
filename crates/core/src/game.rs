@@ -225,6 +225,10 @@ pub struct LayoutCheck {
     /// File extensions it looks at; `lua_entry` checks mod folders and needs none.
     #[serde(default)]
     pub extensions: Vec<String>,
+    /// A problem found here doesn't keep the mod from loading (say, a
+    /// settings file the mod rewrites).
+    #[serde(default)]
+    pub warning_only: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]

@@ -73,7 +73,8 @@ marker_file = "init.lua"
 description = "Cyber Engine Tweaks Lua mods"
 # CET loads mods/<name>/init.lua (ScriptStore.cpp: "Ignoring mod which does
 # not contain init.lua").
-checks = [{ checker = "lua_entry" }, { checker = "json", extensions = ["json"] }]
+# Their JSON files are usually settings the mod rewrites: worth a warning only.
+checks = [{ checker = "lua_entry" }, { checker = "json", extensions = ["json"], warning_only = true }]
 
 [[layout]]
 kind = "red4ext"

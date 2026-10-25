@@ -11,4 +11,9 @@ checker: string,
 /**
  * File extensions it looks at; `lua_entry` checks mod folders and needs none.
  */
-extensions: Array<string>, };
+extensions: Array<string>, 
+/**
+ * A problem found here doesn't keep the mod from loading (say, a
+ * settings file the mod rewrites).
+ */
+warning_only: boolean, };
