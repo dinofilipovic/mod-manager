@@ -777,13 +777,14 @@ fn join(dir: &str, rest: &str) -> String {
 /// Bytes to text, honoring UTF-8/UTF-16 BOMs (and BOM-less UTF-16).
 fn decode(bytes: &[u8]) -> String {
     let utf16 = |rest: &[u8], le: bool| {
-        let units: Vec<u16> = rest
-            .chunks_exact(2)
-            .map(|c| {
+        let (pairs, _) = rest.as_chunks::<2>();
+        let units: Vec<u16> = pairs
+            .iter()
+            .map(|&pair| {
                 if le {
-                    u16::from_le_bytes([c[0], c[1]])
+                    u16::from_le_bytes(pair)
                 } else {
-                    u16::from_be_bytes([c[0], c[1]])
+                    u16::from_be_bytes(pair)
                 }
             })
             .collect();
