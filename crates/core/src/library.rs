@@ -216,7 +216,11 @@ pub struct FomodState {
 
 impl Library {
     /// The default data folder, e.g. `~/Library/Application Support/ModManager`.
+    /// `MM_DATA_DIR` overrides it, so tests and scripts never touch the real library.
     pub fn default_root() -> PathBuf {
+        if let Some(dir) = std::env::var_os("MM_DATA_DIR").filter(|d| !d.is_empty()) {
+            return PathBuf::from(dir);
+        }
         dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("ModManager")

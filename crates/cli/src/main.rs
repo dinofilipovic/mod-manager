@@ -1,7 +1,7 @@
 //! `mm`: command-line front end over `mm-core`. Useful for scripting, for
 //! testing detection without the UI, and on machines without a desktop.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use anyhow::{Context, bail};
@@ -18,6 +18,10 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Only look in this CrossOver bottle folder instead of every environment.
+    #[arg(long, global = true)]
+    bottles_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -27,19 +31,12 @@ enum Command {
     /// List the supported games.
     Games,
     /// List CrossOver bottles and Wine prefixes.
-    Envs {
-        /// Only look in this CrossOver bottle folder.
-        #[arg(long)]
-        bottles_dir: Option<PathBuf>,
-    },
+    Envs,
     /// Find game installs in all environments.
     Detect {
         /// Only look for this game id.
         #[arg(long)]
         game: Option<String>,
-        /// Only look in this CrossOver bottle folder.
-        #[arg(long)]
-        bottles_dir: Option<PathBuf>,
     },
     /// List the mods of a game install in load order (later entries win).
     Mods {
@@ -81,23 +78,21 @@ fn main() -> Result<()> {
                 print_games(&games);
             }
         }
-        Command::Envs { bottles_dir } => {
-            let envs = environments(bottles_dir)?;
+        Command::Envs => {
+            let envs = environments(cli.bottles_dir.as_deref())?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&envs)?);
             } else {
                 print_envs(&envs);
             }
         }
-        Command::Detect {
-            game: game_id,
-            bottles_dir,
-        } => {
+        Command::Detect { game: game_id } => {
             let games = match game_id {
                 Some(id) => vec![game::find_builtin(&id)?],
                 None => game::builtin_games()?,
             };
-            let result = mm_core::scan_environments(&games, environments(bottles_dir)?);
+            let result =
+                mm_core::scan_environments(&games, environments(cli.bottles_dir.as_deref())?);
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
@@ -105,7 +100,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Mods { instance } => {
-            let (game, instance) = pick_instance(instance)?;
+            let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
             let loadout = open_library()?.loadout(&game, &instance)?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&loadout)?);
@@ -128,7 +123,7 @@ fn main() -> Result<()> {
             if archives.is_empty() {
                 bail!("give one or more archives to install");
             }
-            let (game, instance) = pick_instance(instance)?;
+            let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
             let mut library = open_library()?;
             for archive in archives {
                 let outcome = library
@@ -144,7 +139,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Health { instance } => {
-            let (game, instance) = pick_instance(instance)?;
+            let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
             let mut library = open_library()?;
             let loadout = library.loadout(&game, &instance)?;
             let logs = library.logs(&game, &instance)?;
@@ -156,12 +151,12 @@ fn main() -> Result<()> {
             }
         }
         Command::Deploy { instance } => {
-            let (game, instance) = pick_instance(instance)?;
+            let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
             let report = open_library()?.deploy(&game, &instance)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Purge { instance } => {
-            let (game, instance) = pick_instance(instance)?;
+            let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
             let report = open_library()?.purge(&game, &instance)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
@@ -245,9 +240,12 @@ fn open_library() -> Result<Library> {
 }
 
 /// The requested game install, or the only one found.
-fn pick_instance(id: Option<String>) -> Result<(GameDefinition, GameInstance)> {
+fn pick_instance(
+    id: Option<String>,
+    bottles_dir: Option<&Path>,
+) -> Result<(GameDefinition, GameInstance)> {
     let games = game::builtin_games()?;
-    let scan = mm_core::scan(&games);
+    let scan = mm_core::scan_environments(&games, environments(bottles_dir)?);
     let instance = match id {
         Some(id) => scan
             .instances
@@ -269,9 +267,9 @@ fn pick_instance(id: Option<String>) -> Result<(GameDefinition, GameInstance)> {
     Ok((game, instance))
 }
 
-fn environments(bottles_dir: Option<PathBuf>) -> Result<Vec<Environment>> {
+fn environments(bottles_dir: Option<&Path>) -> Result<Vec<Environment>> {
     Ok(match bottles_dir {
-        Some(dir) => crossover::discover_bottles(&dir)?,
+        Some(dir) => crossover::discover_bottles(dir)?,
         None => {
             let steam_ids: Vec<String> = game::builtin_games()?
                 .iter()
