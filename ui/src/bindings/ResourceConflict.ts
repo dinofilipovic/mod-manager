@@ -3,7 +3,7 @@
 /**
  * Two mods' archives changing the same game resources.
  */
-export type ResourceConflict = { winner_mod: string, winner_archive: string, loser_mod: string, loser_archive: string, 
+export type ResourceConflict = { winner_mod_id: string, winner_mod: string, winner_archive: string, loser_mod_id: string, loser_mod: string, loser_archive: string, 
 /**
  * Resources both change; the winner's version is used.
  */

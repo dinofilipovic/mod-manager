@@ -24,8 +24,10 @@ const DEPENDENCY_SIZE: u64 = 8;
 #[derive(Debug, Clone, PartialEq, serde::Serialize, ts_rs::TS)]
 #[ts(export)]
 pub struct ResourceConflict {
+    pub winner_mod_id: String,
     pub winner_mod: String,
     pub winner_archive: String,
+    pub loser_mod_id: String,
     pub loser_mod: String,
     pub loser_archive: String,
     /// Resources both change; the winner's version is used.
@@ -34,6 +36,7 @@ pub struct ResourceConflict {
 
 /// An archive of an enabled mod, in load order (later mods win in the list).
 pub struct ModArchive<'a> {
+    pub mod_id: &'a str,
     pub mod_name: &'a str,
     pub list_position: usize,
     /// The file name in the game's mod folder.
@@ -73,7 +76,7 @@ pub fn conflicts(archives: &[ModArchive], by_list: bool) -> Vec<ResourceConflict
             })
             .unwrap_or_default();
         for &loser in list.iter().filter(|&&i| i != winner) {
-            if archives[loser].mod_name != archives[winner].mod_name {
+            if archives[loser].mod_id != archives[winner].mod_id {
                 *pairs.entry((winner, loser)).or_default() += 1;
             }
         }
@@ -81,8 +84,10 @@ pub fn conflicts(archives: &[ModArchive], by_list: bool) -> Vec<ResourceConflict
     let mut out: Vec<ResourceConflict> = pairs
         .into_iter()
         .map(|((w, l), resources)| ResourceConflict {
+            winner_mod_id: archives[w].mod_id.to_string(),
             winner_mod: archives[w].mod_name.to_string(),
             winner_archive: archives[w].name.to_string(),
+            loser_mod_id: archives[l].mod_id.to_string(),
             loser_mod: archives[l].mod_name.to_string(),
             loser_archive: archives[l].name.to_string(),
             resources,
@@ -132,11 +137,12 @@ pub fn resource_hashes(path: &Path) -> Result<Vec<u64>, Problem> {
     }
     file.seek(SeekFrom::Start(index_pos))
         .map_err(|e| e.to_string())?;
-    let mut index = vec![0u8; index_size as usize];
-    file.read_exact(&mut index).map_err(|e| e.to_string())?;
-    let entries = u64::from(u32_at(&index, 16));
-    let segments = u64::from(u32_at(&index, 20));
-    let dependencies = u64::from(u32_at(&index, 24));
+    let mut index_header = [0u8; INDEX_HEADER_SIZE as usize];
+    file.read_exact(&mut index_header)
+        .map_err(|e| e.to_string())?;
+    let entries = u64::from(u32_at(&index_header, 16));
+    let segments = u64::from(u32_at(&index_header, 20));
+    let dependencies = u64::from(u32_at(&index_header, 24));
     let expected = INDEX_HEADER_SIZE
         + entries * ENTRY_SIZE
         + segments * SEGMENT_SIZE
@@ -144,9 +150,15 @@ pub fn resource_hashes(path: &Path) -> Result<Vec<u64>, Problem> {
     if expected != index_size {
         return Err("has a damaged index".into());
     }
-    Ok((0..entries)
-        .map(|i| u64_at(&index, (INDEX_HEADER_SIZE + i * ENTRY_SIZE) as usize))
-        .collect())
+    // Entry by entry, so a large index isn't read into memory at once.
+    let mut reader = std::io::BufReader::new(file);
+    let mut entry = [0u8; ENTRY_SIZE as usize];
+    let mut hashes = Vec::with_capacity(entries.min(1 << 20) as usize);
+    for _ in 0..entries {
+        reader.read_exact(&mut entry).map_err(|e| e.to_string())?;
+        hashes.push(u64_at(&entry, 0));
+    }
+    Ok(hashes)
 }
 
 #[cfg(test)]
@@ -202,18 +214,21 @@ pub(crate) mod tests {
         let c = [2u64, 3];
         let archives = [
             ModArchive {
+                mod_id: "alpha",
                 mod_name: "Alpha",
                 list_position: 0,
                 name: "zz_alpha.archive",
                 hashes: &a,
             },
             ModArchive {
+                mod_id: "beta",
                 mod_name: "Beta",
                 list_position: 1,
                 name: "aa_beta.archive",
                 hashes: &b,
             },
             ModArchive {
+                mod_id: "gamma",
                 mod_name: "Gamma",
                 list_position: 2,
                 name: "mm_gamma.archive",

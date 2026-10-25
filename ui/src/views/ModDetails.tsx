@@ -238,7 +238,7 @@ export function ModDetails({
             <Icon name="layers" size={12} /> Changes the same game resources as other archives
           </h3>
           {entry.resource_conflicts.map((c) => {
-            const wins = c.winner_mod === m.name;
+            const wins = c.winner_mod_id === m.id;
             return (
               <p key={`${c.winner_archive}-${c.loser_archive}`}>
                 <span className={wins ? "win" : "lose"}>{wins ? "Wins over" : "Loses to"}</span>{" "}

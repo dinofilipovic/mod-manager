@@ -5,7 +5,9 @@ written from the frameworks' source rather than copied from a real run:
 
 - `red4ext-2026-10-25-14-03-11.log`: RED4ext `src/dll/App.cpp` (file name),
   `src/dll/Utils.cpp` (line pattern `[%Y-%m-%d %H:%M:%S.%e] [%^%-8l%$] [%6t] [%n] %v`)
-  and `src/dll/Systems/PluginSystem.cpp` (messages).
+  and `src/dll/Systems/PluginSystem.cpp` (messages; plugins load one at a
+  time, and the "has been loaded" line carries the plugin's own name, so
+  `mod_settings` logs as "Mod Settings").
 - `scripting.log`: Cyber Engine Tweaks `src/Utils.h` (pattern
   `[%Y-%m-%d %H:%M:%S UTC%z] [%t] %v`), `src/scripting/Scripting.cpp` and
   `src/scripting/ScriptStore.cpp` (messages).

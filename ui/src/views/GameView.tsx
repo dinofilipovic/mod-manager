@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { View } from "../App";
 import {
@@ -105,10 +105,15 @@ export function GameView({
   }, [id, toast]);
 
   // The logs say which mods loaded: read them when coming back from the
-  // game (window focus) and when Health opens.
+  // game (window focus) and when Health opens. The backend skips the work
+  // when no log changed; focus can fire on every alt-tab, so at most once
+  // every few seconds.
+  const lastStatusRefresh = useRef(0);
   const refreshStatus = useCallback(async () => {
+    lastStatusRefresh.current = Date.now();
     try {
-      setLoadout(await api.refreshModStatus(id));
+      const updated = await api.refreshModStatus(id);
+      if (updated) setLoadout(updated);
     } catch {
       // Status is a hint; the mod list works without it.
     }
@@ -116,8 +121,11 @@ export function GameView({
 
   useEffect(() => {
     void refreshStatus();
-    window.addEventListener("focus", refreshStatus);
-    return () => window.removeEventListener("focus", refreshStatus);
+    const onFocus = () => {
+      if (Date.now() - lastStatusRefresh.current > 5000) void refreshStatus();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   }, [refreshStatus]);
 
   useEffect(() => {

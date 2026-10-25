@@ -69,14 +69,22 @@ pub fn check_mod(
                 .extension()
                 .map(|e| e.to_string_lossy().to_ascii_lowercase())
                 .unwrap_or_default();
-            for check in layout
-                .checks
-                .iter()
-                .filter(|c| c.extensions.iter().any(|e| e.eq_ignore_ascii_case(&ext)))
-            {
+            let file_name = target.rsplit('/').next().unwrap_or(target);
+            let mut ran = BTreeSet::new();
+            for check in layout.checks.iter().filter(|c| {
+                c.files.iter().any(|f| f.eq_ignore_ascii_case(file_name))
+                    || c.extensions.iter().any(|e| e.eq_ignore_ascii_case(&ext))
+            }) {
+                if !ran.insert(check.checker.as_str()) {
+                    continue;
+                }
                 if let Err(problem) = run_file_check(&check.checker, &path) {
-                    let mut result = error(&check.checker, target, format!("{target} {problem}"));
-                    if check.warning_only {
+                    let mut result = error(
+                        &check.checker,
+                        target,
+                        format!("{target} {}", problem.message),
+                    );
+                    if check.warning_only || problem.harmless {
                         result.severity = CheckSeverity::Warning;
                     }
                     results.push(result);
@@ -112,7 +120,8 @@ pub fn check_mod(
             continue;
         }
         let prefix = format!("{}/", layout.path.to_ascii_lowercase());
-        let mut folders: BTreeMap<String, bool> = BTreeMap::new();
+        // Per folder: init.lua directly inside, init.lua deeper down.
+        let mut folders: BTreeMap<String, (bool, bool)> = BTreeMap::new();
         for target in files {
             // Only files whose most specific layout is this one.
             if game.layout_for(target).map(|l| &l.path) != Some(&layout.path) {
@@ -125,21 +134,42 @@ pub fn check_mod(
             else {
                 continue;
             };
+            let parts: Vec<&str> = rest.split('/').collect();
+            // Loose files next to the mod folders aren't a mod folder.
+            if parts.len() < 2 {
+                continue;
+            }
             let folder = target[prefix.len()..]
                 .split('/')
                 .next()
                 .unwrap_or_default()
                 .to_string();
-            let entry = rest.split('/').nth(1) == Some("init.lua") && rest.split('/').count() == 2;
-            *folders.entry(folder).or_default() |= entry;
+            let is_entry = parts.last() == Some(&"init.lua");
+            let found = folders.entry(folder).or_default();
+            found.0 |= is_entry && parts.len() == 2;
+            found.1 |= is_entry && parts.len() > 2;
         }
-        for (folder, _) in folders.into_iter().filter(|(_, ok)| !ok) {
+        for (folder, (direct, deeper)) in folders {
             let target = format!("{}/{folder}", layout.path);
-            results.push(error(
-                "lua_entry",
-                &target,
-                format!("{target} has no init.lua directly inside, so it isn't loaded; the mod may be packed one folder too deep"),
-            ));
+            if direct {
+                continue;
+            }
+            results.push(if deeper {
+                error(
+                    "lua_entry",
+                    &target,
+                    format!("{target} has no init.lua directly inside, so it isn't loaded; the mod is packed one folder too deep"),
+                )
+            } else {
+                // Add-ons put files into another mod's folder (Appearance
+                // Menu Mod's collabs, translations).
+                CheckResult {
+                    check: "lua_entry".into(),
+                    severity: CheckSeverity::Warning,
+                    target: Some(target.clone()),
+                    message: format!("{target} has no init.lua; fine if it adds to another CET mod, otherwise it isn't loaded"),
+                }
+            });
         }
     }
 
@@ -196,32 +226,67 @@ fn join(root: &Path, target: &str) -> std::path::PathBuf {
         .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
-/// Runs a file checker; the error completes "<file> ...".
-fn run_file_check(checker: &str, path: &Path) -> Result<(), String> {
+/// Why a file failed a check.
+struct FileProblem {
+    /// Completes "<file> ...".
+    message: String,
+    /// The game tolerates it, so it's only worth a warning.
+    harmless: bool,
+}
+
+impl From<String> for FileProblem {
+    fn from(message: String) -> Self {
+        FileProblem {
+            message,
+            harmless: false,
+        }
+    }
+}
+
+/// Runs a file checker.
+fn run_file_check(checker: &str, path: &Path) -> Result<(), FileProblem> {
+    let unreadable = |e: std::io::Error| FileProblem::from(format!("can't be read ({e})"));
     match checker {
-        "archive_header" => crate::archive_index::resource_hashes(path).map(|_| ()),
+        "archive_header" => Ok(crate::archive_index::resource_hashes(path).map(|_| ())?),
         "json" => {
-            let bytes = std::fs::read(path).map_err(|e| format!("can't be read ({e})"))?;
+            let bytes = std::fs::read(path).map_err(unreadable)?;
             // Many tools write a byte order mark first.
             let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
             serde_json::from_slice::<serde_json::Value>(bytes)
                 .map(|_| ())
-                .map_err(|e| format!("isn't valid JSON ({e})"))
+                .map_err(|e| format!("isn't valid JSON ({e})").into())
         }
         "yaml" => {
-            let text = std::fs::read_to_string(path).map_err(|e| format!("can't be read ({e})"))?;
+            let text = std::fs::read_to_string(path).map_err(unreadable)?;
             yaml_rust2::YamlLoader::load_from_str(text.trim_start_matches('\u{feff}'))
                 .map(|_| ())
-                .map_err(|e| format!("isn't valid YAML ({e})"))
+                .map_err(|e| {
+                    let message = e.to_string();
+                    FileProblem {
+                        // yaml-cpp, which TweakXL and ArchiveXL use, keeps
+                        // one of the values.
+                        harmless: message.contains("duplicated key"),
+                        message: format!("isn't valid YAML ({message})"),
+                    }
+                })
         }
         "pe64_dll" => {
-            let mut head = vec![0u8; 4096];
-            let read = std::io::Read::read(
-                &mut std::fs::File::open(path).map_err(|e| format!("can't be read ({e})"))?,
-                &mut head,
-            )
-            .map_err(|e| format!("can't be read ({e})"))?;
-            check_pe64_dll(&head[..read])
+            use std::io::{Read, Seek, SeekFrom};
+            let mut file = std::fs::File::open(path).map_err(unreadable)?;
+            let mut head = Vec::new();
+            (&mut file)
+                .take(0x40)
+                .read_to_end(&mut head)
+                .map_err(unreadable)?;
+            // The PE header can start anywhere the DOS header points.
+            if head.len() == 0x40 {
+                let pe = u32::from_le_bytes(head[0x3C..0x40].try_into().unwrap()) as u64;
+                if pe >= 0x40 && file.seek(SeekFrom::Start(pe)).is_ok() {
+                    head.resize(pe as usize, 0);
+                    file.take(24).read_to_end(&mut head).map_err(unreadable)?;
+                }
+            }
+            Ok(check_pe64_dll(&head)?)
         }
         // Folder checks run separately.
         _ => Ok(()),
@@ -404,6 +469,55 @@ mod tests {
                 .iter()
                 .find(|r| r.check == "pe64_dll" && r.message.contains("32-bit"))
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn what_the_game_tolerates_is_only_a_warning() {
+        let game = find_builtin("cyberpunk2077").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // A PE header past the first 4 KiB is still a DLL.
+        let mut far = vec![0u8; 0x2100];
+        far[..2].copy_from_slice(b"MZ");
+        far[0x3C..0x40].copy_from_slice(&0x2000u32.to_le_bytes());
+        far[0x2000..0x2004].copy_from_slice(b"PE\0\0");
+        far[0x2004..0x2006].copy_from_slice(&0x8664u16.to_le_bytes());
+        far[0x2016..0x2018].copy_from_slice(&0x2022u16.to_le_bytes());
+        let files = write(
+            dir.path(),
+            &[
+                // An add-on for another CET mod, and a loose readme.
+                (
+                    "bin/x64/plugins/cyber_engine_tweaks/mods/AppearanceMenuMod/Collabs/Props/props.lua",
+                    b"return {}",
+                ),
+                ("bin/x64/plugins/cyber_engine_tweaks/mods/readme.txt", b"hi"),
+                (
+                    "r6/tweaks/Dup/dup.yaml",
+                    b"Items.A:\n  price: 1\n  price: 2\n",
+                ),
+                ("mods/Redmod/info.json", b"{\"name\":\"Redmod\"}"),
+                ("mods/Redmod/custom_sounds/config.json", b""),
+                ("red4ext/plugins/Far/Far.dll", far.as_slice()),
+            ],
+        );
+        let results = check_mod(&game, dir.path(), &files, 60);
+        assert_eq!(
+            checks(&results),
+            [
+                ("yaml", CheckSeverity::Warning),
+                ("json", CheckSeverity::Warning),
+                ("lua_entry", CheckSeverity::Warning),
+            ],
+            "{results:#?}"
+        );
+        assert!(!wont_load(&results));
+
+        // But a REDmod's info.json must parse.
+        let files = write(dir.path(), &[("mods/Broken/info.json", b"{")]);
+        assert_eq!(
+            checks(&check_mod(&game, dir.path(), &files, 60)),
+            [("json", CheckSeverity::Error)]
         );
     }
 

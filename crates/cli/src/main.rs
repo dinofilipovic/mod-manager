@@ -458,16 +458,20 @@ fn main() -> Result<()> {
             let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
             let mut library = open_library()?;
             let record = find_mod(&library, &game, &mod_ref)?;
-            let archive = match archive {
-                Some(path) => path,
-                None => download_update(&library, &game, &record)?,
+            // Only a downloaded update is known to be the update's file.
+            let (archive, nexus_file_id) = match archive {
+                Some(path) => (path, None),
+                None => (
+                    download_update(&library, &game, &record)?,
+                    record
+                        .update_file_id
+                        .filter(|_| record.nexus_mod_id.is_some()),
+                ),
             };
             let meta = ModMeta {
                 replaces: Some(record.id.clone()),
                 nexus_mod_id: record.nexus_mod_id,
-                nexus_file_id: record
-                    .update_file_id
-                    .filter(|_| record.nexus_mod_id.is_some()),
+                nexus_file_id,
                 ..Default::default()
             };
             let job = library.begin_install(&game, &archive, meta, Some(&instance.id))?;
@@ -543,7 +547,9 @@ fn main() -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&outcome)?);
                     } else {
                         println!(
-                            "Adopted {} ({} files); the game folder wasn't changed.",
+                            "Adopted {} ({} files); the game folder wasn't changed.\n\
+                             It's managed now: disabling it or purging removes its files from the game\n\
+                             folder (the library keeps a copy), and uninstalling deletes both.",
                             outcome.record.name, outcome.record.file_count
                         );
                     }

@@ -50,6 +50,12 @@ fn logs_tell_which_mods_loaded() {
         "Broken Plugin",
         &["red4ext/plugins/BrokenPlugin/BrokenPlugin.dll"],
     );
+    // Its self-declared name ("Mod Settings") isn't its folder's.
+    let mod_settings = install(
+        "Mod Settings",
+        &["red4ext/plugins/mod_settings/mod_settings.dll"],
+    );
+    let old_plugin = install("Old Plugin", &["red4ext/plugins/OldPlugin/OldPlugin.dll"]);
     let settings = install(
         "Native Settings",
         &["bin/x64/plugins/cyber_engine_tweaks/mods/nativeSettings/init.lua"],
@@ -95,7 +101,16 @@ fn logs_tell_which_mods_loaded() {
             ),
         ],
     );
-    let statuses = lib.refresh_mod_status(&game, &instance).unwrap();
+    let statuses = lib
+        .refresh_mod_status_if_changed(&game, &instance)
+        .unwrap()
+        .expect("the logs are new");
+    assert!(
+        lib.refresh_mod_status_if_changed(&game, &instance)
+            .unwrap()
+            .is_none(),
+        "nothing changed since"
+    );
     let status = |id: &str| statuses[id].status;
     assert_eq!(status(&axl), LoadStatus::Loaded);
     assert_eq!(
@@ -103,6 +118,12 @@ fn logs_tell_which_mods_loaded() {
         LoadStatus::Errors,
         "{}",
         statuses[&broken_plugin].detail
+    );
+    assert_eq!(status(&mod_settings), LoadStatus::Loaded);
+    assert_eq!(
+        status(&old_plugin),
+        LoadStatus::Errors,
+        "incompatible with the patch"
     );
     assert_eq!(status(&settings), LoadStatus::Loaded);
     assert_eq!(status(&broken_cet), LoadStatus::Errors);

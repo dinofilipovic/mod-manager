@@ -1146,13 +1146,20 @@ pub async fn adopt_mod(
 
 /// Reads the game's logs again for whether each mod loaded.
 #[tauri::command]
-pub async fn refresh_mod_status(app: AppHandle, instance_id: String) -> LoadoutResult {
+pub async fn refresh_mod_status(
+    app: AppHandle,
+    instance_id: String,
+) -> CommandResult<Option<Loadout>> {
     blocking(app, move |_, state| {
         let (instance, game, _) = state.resolve(&instance_id)?;
-        lock(&state.library)
-            .refresh_mod_status(game, &instance)
+        let changed = lock(&state.library)
+            .refresh_mod_status_if_changed(game, &instance)
             .map_err(err)?;
-        loadout(state, &instance_id)
+        // Nothing new in the logs: the shown mod list is still right.
+        match changed {
+            Some(_) => loadout(state, &instance_id).map(Some),
+            None => Ok(None),
+        }
     })
     .await
 }

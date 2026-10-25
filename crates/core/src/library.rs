@@ -227,6 +227,8 @@ pub struct Library {
     warnings: Vec<String>,
     /// Resource hashes of `.archive` files, by path, size and time.
     archive_indexes: HashMap<PathBuf, (u64, i64, Vec<u64>)>,
+    /// Per instance, what the last status refresh saw (`status_inputs`).
+    status_inputs: HashMap<String, u64>,
 }
 
 struct PendingFomod {
@@ -561,6 +563,7 @@ impl Library {
             pending: HashMap::new(),
             warnings: Vec::new(),
             archive_indexes: HashMap::new(),
+            status_inputs: HashMap::new(),
         };
         library.clean_tmp();
         // A recovery that fails now (say, the game's drive isn't mounted) is
@@ -1322,6 +1325,39 @@ impl Library {
         }
         let final_dir = self.mod_dir(&id);
         fs::rename(&staging, &final_dir).map_err(|e| Error::io(&final_dir, e))?;
+        let recorded = self.record_adopted(game, instance, &id, name, files, mod_files, size_bytes);
+        let record = match recorded {
+            Ok(record) => record,
+            Err(e) => {
+                // Leave nothing half-adopted: the game's files were only copied.
+                let _ = self.store.forget_deployed_files_of(&instance.id, &id);
+                let _ = self.store.delete_mod(&id);
+                let _ = fs::remove_dir_all(&final_dir);
+                return Err(e);
+            }
+        };
+        Ok(InstallOutcome {
+            record,
+            skipped: Vec::new(),
+            warnings: Vec::new(),
+            replaced_existing: false,
+            replayed_choices: false,
+        })
+    }
+
+    /// The store side of `adopt`, once the copies are in the library.
+    #[allow(clippy::too_many_arguments)]
+    fn record_adopted(
+        &mut self,
+        game: &GameDefinition,
+        instance: &GameInstance,
+        id: &str,
+        name: String,
+        files: &[String],
+        mod_files: Vec<ModFile>,
+        size_bytes: u64,
+    ) -> Result<ModRecord> {
+        let id = id.to_string();
         let kinds: std::collections::BTreeSet<String> = files
             .iter()
             .filter_map(|f| game.layout_for(f).map(|t| t.kind.clone()))
@@ -1387,13 +1423,7 @@ impl Library {
             priority: 0,
         });
         self.save_entries(&profile_id, entries)?;
-        Ok(InstallOutcome {
-            record,
-            skipped: Vec::new(),
-            warnings: Vec::new(),
-            replaced_existing: false,
-            replayed_choices: false,
-        })
+        Ok(record)
     }
 
     // Before launching
@@ -1409,10 +1439,25 @@ impl Library {
         };
         let loadout = self.loadout(game, instance)?;
         let mut items = Vec::new();
+        // Only overrides for script extenders that are installed matter.
+        let needed = |dll: &str| {
+            let framework = game
+                .wine
+                .dll_overrides
+                .iter()
+                .find(|o| o.dll.eq_ignore_ascii_case(dll))
+                .and_then(|o| o.framework.as_deref());
+            framework.is_none_or(|id| {
+                loadout
+                    .frameworks
+                    .iter()
+                    .any(|f| f.id == id && f.is_available())
+            })
+        };
         let missing_dlls: Vec<&str> = instance
             .dll_overrides
             .iter()
-            .filter(|d| !d.satisfied)
+            .filter(|d| !d.satisfied && needed(&d.dll))
             .map(|d| d.dll.as_str())
             .collect();
         if !missing_dlls.is_empty() {
@@ -2344,7 +2389,7 @@ impl Library {
                         .map(|m| {
                             resource_conflicts
                                 .iter()
-                                .filter(|c| c.winner_mod == m.name || c.loser_mod == m.name)
+                                .filter(|c| c.winner_mod_id == m.id || c.loser_mod_id == m.id)
                                 .cloned()
                                 .collect()
                         })
@@ -2402,7 +2447,7 @@ impl Library {
             .rsplit_once('/')
             .map_or("", |(d, _)| d)
             .to_ascii_lowercase();
-        let mut found: Vec<(String, usize, String, Vec<u64>)> = Vec::new();
+        let mut found: Vec<(&str, &str, usize, String, Vec<u64>)> = Vec::new();
         for (position, (entry, targets)) in entries.iter().zip(files).enumerate() {
             let Some(record) = mods.get(&entry.mod_id).filter(|_| entry.enabled) else {
                 continue;
@@ -2431,12 +2476,13 @@ impl Library {
                         h
                     }
                 };
-                found.push((record.name.clone(), position, name.to_string(), hashes));
+                found.push((&record.id, &record.name, position, name.to_string(), hashes));
             }
         }
         let archives: Vec<ModArchive> = found
             .iter()
-            .map(|(mod_name, position, name, hashes)| ModArchive {
+            .map(|(mod_id, mod_name, position, name, hashes)| ModArchive {
+                mod_id,
                 mod_name,
                 list_position: *position,
                 name,
@@ -2840,6 +2886,42 @@ impl Library {
 
     /// Reads the logs again for whether each enabled mod loaded, and keeps
     /// the result for the mod list.
+    /// `refresh_mod_status`, unless the logs, the last apply and the enabled
+    /// mods are as they were at the last refresh (then `None`). Cheap enough
+    /// to run whenever the window gets focus.
+    pub fn refresh_mod_status_if_changed(
+        &mut self,
+        game: &GameDefinition,
+        instance: &GameInstance,
+    ) -> Result<Option<BTreeMap<String, ModStatus>>> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for path in health::log_paths(game, &instance.install_path) {
+            let meta = fs::metadata(&path).ok();
+            (
+                path,
+                meta.as_ref().map(|m| m.len()),
+                meta.and_then(|m| m.modified().ok()),
+            )
+                .hash(&mut hasher);
+        }
+        self.store.deployed_at(&instance.id)?.hash(&mut hasher);
+        let profile_id = self.ensure_active_profile(&instance.id)?;
+        for e in self.effective_entries(&game.id, &profile_id)? {
+            (e.mod_id, e.enabled).hash(&mut hasher);
+        }
+        for m in self.store.mods_for_game(&game.id)? {
+            (m.id, m.revision).hash(&mut hasher);
+        }
+        let inputs = hasher.finish();
+        if self.status_inputs.get(&instance.id) == Some(&inputs) {
+            return Ok(None);
+        }
+        let statuses = self.refresh_mod_status(game, instance)?;
+        self.status_inputs.insert(instance.id.clone(), inputs);
+        Ok(Some(statuses))
+    }
+
     pub fn refresh_mod_status(
         &mut self,
         game: &GameDefinition,
@@ -3436,13 +3518,15 @@ mod tests {
         use crate::preflight::{PreflightAction, PreflightSeverity};
         let mut f = fixture();
         f.instance.version = Some("2.5".into());
-        f.instance.dll_overrides = vec![crate::detect::DllOverrideStatus {
-            dll: "winmm".into(),
+        // CET is installed below, RED4ext isn't: only CET's override matters.
+        let missing = |dll: &str| crate::detect::DllOverrideStatus {
+            dll: dll.into(),
             required: "native,builtin".into(),
             current: None,
             satisfied: false,
             reason: String::new(),
-        }];
+        };
+        f.instance.dll_overrides = vec![missing("version"), missing("winmm")];
         let id = f.instance.id.clone();
         let script = zip(&f, "script.zip", &[("r6/scripts/Cool/main.reds", "x")]);
         let broken = zip(
@@ -3476,10 +3560,13 @@ mod tests {
             .map(|i| (i.title.as_str(), i.severity))
             .collect();
         assert!(preflight.has_errors());
-        assert!(titles.contains(&(
-            "Wine won't load the script extenders",
-            PreflightSeverity::Error
-        )));
+        let dlls = preflight
+            .items
+            .iter()
+            .find(|i| i.title == "Wine won't load the script extenders")
+            .unwrap();
+        assert_eq!(dlls.severity, PreflightSeverity::Error);
+        assert!(dlls.detail.contains("version") && !dlls.detail.contains("winmm"));
         assert!(titles.contains(&(
             "Cyber Engine Tweaks is too old for this game version",
             PreflightSeverity::Error

@@ -555,6 +555,16 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Forgets the deployed files a mod placed in an instance, leaving the
+    /// files themselves.
+    pub fn forget_deployed_files_of(&self, instance_id: &str, mod_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM deployed_files WHERE instance_id = ?1 AND mod_id = ?2",
+            params![instance_id, mod_id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_mod(&self, id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM mods WHERE id = ?1", [id])?;
         Ok(())

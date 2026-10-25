@@ -80,6 +80,57 @@ pub fn matches(pattern: &str, name: &str, text: &str) -> bool {
     }
 }
 
+/// A mod's block in a log that logs one block per mod.
+struct Block<'a> {
+    text: &'a str,
+    /// Another block or the end text followed, so the block is complete.
+    ended: bool,
+}
+
+/// The blocks of `text` that start with `start` on a line naming one of
+/// `names` as a path component (`\name\` or `\name.`).
+fn blocks_of<'a>(
+    text: &'a str,
+    start: &str,
+    end: Option<&str>,
+    names: &[String],
+) -> Vec<Block<'a>> {
+    let mut starts: Vec<usize> = Vec::new();
+    let mut end_at = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if line.contains(start) {
+            starts.push(offset);
+        } else if end_at.is_none() && end.is_some_and(|e| line.contains(e)) {
+            end_at = Some(offset);
+        }
+        offset += line.len();
+    }
+    let mut out = Vec::new();
+    for (i, &from) in starts.iter().enumerate() {
+        let next = starts.get(i + 1).copied();
+        let to = next.into_iter().chain(end_at.filter(|&e| e > from)).min();
+        let block = &text[from..to.unwrap_or(text.len())];
+        let first = block
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        let named = names.iter().any(|n| {
+            let n = n.to_ascii_lowercase();
+            first.contains(&format!("\\{n}\\")) || first.contains(&format!("\\{n}."))
+        });
+        if named {
+            out.push(Block {
+                text: block,
+                ended: to.is_some(),
+            });
+        }
+    }
+    out
+}
+
 /// The folder names a mod has under the layout paths of `kind` (and DLL file
 /// stems there, which loaders sometimes report instead).
 fn names_for(game: &GameDefinition, kind: &str, files: &[String]) -> Vec<String> {
@@ -169,7 +220,21 @@ pub fn statuses(
                         .needs
                         .as_ref()
                         .is_none_or(|n| text.contains(n.as_str()));
-                    let loaded = complete && names.iter().any(|n| matches(&status.loaded, n, text));
+                    let (loaded, ended_without) = match &status.block {
+                        Some(start) => {
+                            let blocks = blocks_of(text, start, status.needs.as_deref(), &names);
+                            (
+                                blocks.iter().any(|b| matches(&status.loaded, "", b.text)),
+                                blocks.iter().any(|b| b.ended),
+                            )
+                        }
+                        None => (
+                            names.iter().any(|n| matches(&status.loaded, n, text)),
+                            false,
+                        ),
+                    };
+                    let loaded = complete && loaded;
+                    let failed = failed || (!loaded && ended_without);
                     if failed {
                         ModStatus {
                             status: LoadStatus::Errors,
@@ -218,9 +283,14 @@ mod tests {
     #[test]
     fn patterns() {
         assert!(matches(
-            "Mod {name} loaded!",
+            "] Mod {name} loaded!",
             "nativeSettings",
             "[x] Mod NativeSettings loaded! ('C:\\\\...')"
+        ));
+        assert!(!matches(
+            "] Mod {name} loaded!",
+            "A",
+            "[x] Mod Cool Mod A loaded! ('C:\\\\...')"
         ));
         assert!(matches(
             "^{name}\\",

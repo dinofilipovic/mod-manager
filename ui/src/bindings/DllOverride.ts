@@ -4,4 +4,9 @@ export type DllOverride = { dll: string,
 /**
  * Wine load order, e.g. `native,builtin`.
  */
-mode: string, reason: string, };
+mode: string, reason: string, 
+/**
+ * The framework that loads through it; when set, a missing override only
+ * matters once that framework is installed.
+ */
+framework: string | null, };

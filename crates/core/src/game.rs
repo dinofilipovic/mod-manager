@@ -164,6 +164,12 @@ pub struct LogStatus {
     /// finished).
     #[serde(default)]
     pub needs: Option<String>,
+    /// For loaders that log one block per mod: the text starting a block,
+    /// on a line that also has the mod's path. `loaded` is then looked for
+    /// in the mod's block, and a block that ends without it means the mod
+    /// didn't load.
+    #[serde(default)]
+    pub block: Option<String>,
 }
 
 /// A file through which the game takes an explicit archive load order.
@@ -225,6 +231,10 @@ pub struct LayoutCheck {
     /// File extensions it looks at; `lua_entry` checks mod folders and needs none.
     #[serde(default)]
     pub extensions: Vec<String>,
+    /// File names it looks at, whatever their extension. A file only gets
+    /// the first check of each checker that names it.
+    #[serde(default)]
+    pub files: Vec<String>,
     /// A problem found here doesn't keep the mod from loading (say, a
     /// settings file the mod rewrites).
     #[serde(default)]
@@ -248,6 +258,10 @@ pub struct DllOverride {
     pub mode: String,
     #[serde(default)]
     pub reason: String,
+    /// The framework that loads through it; when set, a missing override only
+    /// matters once that framework is installed.
+    #[serde(default)]
+    pub framework: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]

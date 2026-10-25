@@ -37,6 +37,13 @@ pub fn unowned_groups(
         .load_order
         .as_ref()
         .map(|o| o.file.to_ascii_lowercase());
+    // Folders a managed mod placed files in. Frameworks write logs and
+    // settings into their mods' folders (CET's `mods/<name>/<name>.log`);
+    // those belong to the mod, not to a hand-installed one.
+    let owned_dirs: HashSet<&str> = owned
+        .iter()
+        .flat_map(|path| path.match_indices('/').map(move |(i, _)| &path[..i]))
+        .collect();
     let mut groups: BTreeMap<(String, String), UnownedGroup> = BTreeMap::new();
     for layout in game
         .layout
@@ -70,12 +77,16 @@ pub fn unowned_groups(
             let rest = &target[layout.path.len()..].trim_start_matches('/');
             let mut parts = rest.split('/');
             let first = parts.next().unwrap_or_default();
-            let name = if parts.next().is_some() && !layout.flatten {
+            let in_folder = parts.next().is_some() && !layout.flatten;
+            if in_folder && owned_dirs.contains(&key[..layout.path.len() + 1 + first.len()]) {
+                continue;
+            }
+            let name = if in_folder {
                 first.to_string()
             } else {
-                // A loose file: its name up to the first dot, so
+                // A loose file: its name without the layout's extensions, so
                 // `x.archive` and `x.archive.xl` go together.
-                first.split('.').next().unwrap_or(first).to_string()
+                strip_extensions(first, &layout.extensions).to_string()
             };
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
             let group = groups
@@ -97,4 +108,15 @@ pub fn unowned_groups(
             g
         })
         .collect()
+}
+
+/// `name` without trailing extensions from `extensions` (`x.archive.xl` → `x`).
+fn strip_extensions<'a>(mut name: &'a str, extensions: &[String]) -> &'a str {
+    while let Some((stem, ext)) = name.rsplit_once('.') {
+        if stem.is_empty() || !extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
+            break;
+        }
+        name = stem;
+    }
+    name
 }

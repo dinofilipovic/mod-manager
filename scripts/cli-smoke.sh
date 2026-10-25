@@ -15,6 +15,8 @@ GAME="$BOTTLES/Cyberpunk 2077/drive_c/GOG Games/Cyberpunk 2077"
 mm() { "$MM" --bottles-dir "$BOTTLES" "$@"; }
 step() { printf '\n== %s\n' "$*"; }
 fail() { echo "FAILED: $*" >&2; exit 1; }
+# Kept when something failed, to look at.
+trap 'code=$?; [ "$code" = 0 ] && rm -rf "$WORK" || echo "Left $WORK for inspection" >&2' EXIT
 
 step "fake bottle in $WORK"
 mkdir -p "$BOTTLES/Cyberpunk 2077/drive_c/users/crossover" "$GAME/bin/x64" "$GAME/engine/config/base"
@@ -23,21 +25,29 @@ printf 'WINE REGISTRY Version 2\n' > "$BOTTLES/Cyberpunk 2077/system.reg"
 printf 'WINE REGISTRY Version 2\n\n[Software\\\\Wine\\\\DllOverrides] 1\n"version"="native,builtin"\n"winmm"="native,builtin"\n' > "$BOTTLES/Cyberpunk 2077/user.reg"
 printf 'MZ game' > "$GAME/bin/x64/Cyberpunk2077.exe"
 printf '[General]\nOriginal=1\n' > "$GAME/engine/config/base/general.ini"
-snapshot() { (cd "$GAME" && find . -type f -print0 | sort -z | xargs -0 shasum -a 256); }
+snapshot() { (cd "$GAME" && find . -type f -print0 | sort -z | xargs -0 shasum -a 256 && find . -type d | sort); }
 BEFORE=$(snapshot)
 
 step "archives"
+# A valid, empty Cyberpunk .archive: 40-byte header, 4 bytes of custom data
+# length, 28-byte index header with no entries.
+rdar() {
+  printf 'RDAR\x0c\0\0\0\x2c\0\0\0\0\0\0\0\x1c\0\0\0' > "$1"
+  printf '\0%.0s' {1..12} >> "$1"
+  printf '\x48\0\0\0\0\0\0\0' >> "$1"
+  printf '\0%.0s' {1..32} >> "$1"
+}
 make_mod() { # name version archive
   local dir="$WORK/src/$1-$2"
   mkdir -p "$dir/archive/pc/mod" "$dir/r6/scripts/$1" "$dir/engine/config/base"
-  printf 'RDAR %s %s' "$1" "$2" > "$dir/archive/pc/mod/$1.archive"
+  rdar "$dir/archive/pc/mod/$1.archive"
   printf '// %s %s\n' "$1" "$2" > "$dir/r6/scripts/$1/main.reds"
   printf '[General]\nModded=%s\n' "$2" > "$dir/engine/config/base/general.ini"
   (cd "$dir" && zip -qr "$WORK/$3" .)
 }
 make_mod Smoke 1 Smoke.zip
 make_mod Smoke 2 Smoke-v2.zip
-mkdir -p "$WORK/src/Helper/archive/pc/mod" && printf 'helper' > "$WORK/src/Helper/archive/pc/mod/helper.archive"
+mkdir -p "$WORK/src/Helper/archive/pc/mod" && rdar "$WORK/src/Helper/archive/pc/mod/helper.archive"
 (cd "$WORK/src/Helper" && zip -qr "$WORK/Helper.zip" .)
 
 step "detect, install, deploy"
@@ -52,13 +62,15 @@ out=$(mm deps); grep -q "redscript.*MISSING" <<< "$out" || fail "missing redscri
 set +e; mm preflight > "$WORK/preflight.txt"; code=$?; set -e
 [ "$code" = 2 ] || fail "preflight should exit 2 with errors, got $code"
 grep -q "Smoke needs redscript" "$WORK/preflight.txt" || fail "preflight misses the requirement"
+! grep -q "won't load" "$WORK/preflight.txt" || fail "valid archives reported as broken"
 
 step "profiles, enable, disable"
 mm profiles create Vanilla > /dev/null
 out=$(mm --json profiles); grep -q '"name": "Vanilla"' <<< "$out" || fail "profile not created"
 mm profiles switch Default > /dev/null
 mm disable --mod Helper > /dev/null
-out=$(mm --json mods); grep -q '"enabled": false' <<< "$out" || fail "disable didn't stick"
+out=$(mm mods); grep -q '\[ \] Helper' <<< "$out" || fail "disable didn't stick"
+grep -q '\[x\] Smoke' <<< "$out" || fail "disable hit the wrong mod"
 mm enable --mod Helper > /dev/null
 
 step "update and rollback"
@@ -76,15 +88,17 @@ mkdir -p "$GAME/r6/scripts/ByHand"
 printf '// by hand' > "$GAME/r6/scripts/ByHand/main.reds"
 out=$(mm adopt); grep -q "ByHand" <<< "$out" || fail "hand-installed mod not found"
 mm adopt --name ByHand > /dev/null
-rm "$GAME/r6/scripts/ByHand/main.reds"; rmdir "$GAME/r6/scripts/ByHand"
+mv "$GAME/r6/scripts/ByHand/main.reds" "$WORK/byhand.reds"
 out=$(mm --json verify); grep -q '"Missing"' <<< "$out" || fail "removed adopted file not reported missing"
-mm disable --mod ByHand > /dev/null
+mv "$WORK/byhand.reds" "$GAME/r6/scripts/ByHand/main.reds"
 
 step "purge"
+# Purge takes adopted files out too: the game folder ends as it started.
 mm purge > /dev/null
-# Folders mods are dropped into stay on purpose; files must match exactly.
-AFTER=$(snapshot)
+[ ! -e "$GAME/r6/scripts/ByHand" ] || fail "adopted mod not purged"
+# Only the folders mods are dropped into may stay behind.
+AFTER=$(snapshot | grep -vxE '\./(archive|archive/pc|archive/pc/mod|r6|r6/scripts)')
 [ "$BEFORE" = "$AFTER" ] || { diff <(echo "$BEFORE") <(echo "$AFTER"); fail "game folder differs after purge"; }
 
 echo
-echo "CLI smoke test passed ($WORK)"
+echo "CLI smoke test passed"

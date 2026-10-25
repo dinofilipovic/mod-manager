@@ -14,4 +14,11 @@ kind: string, loaded: string, failed: string | null,
  * Text the log must also contain for `loaded` to count (a run that
  * finished).
  */
-needs: string | null, };
+needs: string | null, 
+/**
+ * For loaders that log one block per mod: the text starting a block,
+ * on a line that also has the mod's path. `loaded` is then looked for
+ * in the mod's block, and a block that ends without it means the mod
+ * didn't load.
+ */
+block: string | null, };

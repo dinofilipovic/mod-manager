@@ -9,7 +9,7 @@ import { isUnmet, stateLabel } from "../deps";
 import type { Loadout } from "../bindings/Loadout";
 import type { LogReport } from "../bindings/LogReport";
 import type { FrameworkStatus } from "../bindings/FrameworkStatus";
-import { Dialog } from "../components/Dialog";
+import { ConfirmDialog, Dialog } from "../components/Dialog";
 import { Icon } from "../components/Icon";
 import { useToast } from "../components/Toasts";
 import { formatBytes, plural, timeAgo } from "../format";
@@ -551,6 +551,7 @@ function HandInstalledCard({ instanceId, onLoadout }: { instanceId: string; onLo
   const [groups, setGroups] = useState<UnownedGroup[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [adopting, setAdopting] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<UnownedGroup | null>(null);
 
   const scan = useCallback(async () => {
     setError(null);
@@ -569,7 +570,7 @@ function HandInstalledCard({ instanceId, onLoadout }: { instanceId: string; onLo
     setAdopting(g.name);
     try {
       onLoadout(await api.adoptMod(instanceId, g.name, g.files));
-      toast("success", `${g.name} is now a mod in your list`, "Its files stayed where they were. Removing it takes them out of the game.");
+      toast("success", `${g.name} is now a mod in your list`, "Its files stayed where they were.");
       await scan();
     } catch (e) {
       toast("error", `Couldn't adopt ${g.name}`, `${errorMessage(e)} Scan again and retry.`);
@@ -605,12 +606,32 @@ function HandInstalledCard({ instanceId, onLoadout }: { instanceId: string; onLo
                 {g.kind} · {g.files.length === 1 ? "1 file" : `${g.files.length} files`} · {formatBytes(g.size_bytes)}
               </span>
             </span>
-            <button disabled={adopting !== null} onClick={() => adopt(g)}>
+            <button disabled={adopting !== null} onClick={() => setConfirming(g)}>
               {adopting === g.name ? "Adopting…" : "Adopt as mod"}
             </button>
           </li>
         ))}
       </ul>
+      {confirming && (
+        <ConfirmDialog
+          title={`Adopt ${confirming.name}?`}
+          message={
+            <>
+              <p>
+                A copy of its {plural(confirming.files.length, "file")} goes into the library, and the files in the game
+                folder stay where they are.
+              </p>
+              <p>
+                From then on this app manages them: disabling the mod or purging takes them out of the game folder (the
+                library keeps its copy), and uninstalling deletes both.
+              </p>
+            </>
+          }
+          confirmLabel="Adopt"
+          onConfirm={() => void adopt(confirming)}
+          onClose={() => setConfirming(null)}
+        />
+      )}
     </section>
   );
 }

@@ -122,7 +122,8 @@ export const api = {
   unownedMods: (instanceId: string) => invoke<UnownedGroup[]>("unowned_mods", { instanceId }),
   adoptMod: (instanceId: string, name: string, files: string[]) =>
     invoke<Loadout>("adopt_mod", { instanceId, name, files }),
-  refreshModStatus: (instanceId: string) => invoke<Loadout>("refresh_mod_status", { instanceId }),
+  /** The new mod list, or null when the logs haven't changed since last time. */
+  refreshModStatus: (instanceId: string) => invoke<Loadout | null>("refresh_mod_status", { instanceId }),
   preflight: (instanceId: string) => invoke<Preflight>("preflight", { instanceId }),
   getMissing: (instanceId: string) => invoke<UpdateAllResult>("get_missing", { instanceId }),
   modRevisions: (modId: string) => invoke<RevisionInfo[]>("mod_revisions", { modId }),

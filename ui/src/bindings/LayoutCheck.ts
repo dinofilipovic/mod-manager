@@ -13,6 +13,11 @@ checker: string,
  */
 extensions: Array<string>, 
 /**
+ * File names it looks at, whatever their extension. A file only gets
+ * the first check of each checker that names it.
+ */
+files: Array<string>, 
+/**
  * A problem found here doesn't keep the mod from loading (say, a
  * settings file the mod rewrites).
  */
