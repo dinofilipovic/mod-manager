@@ -236,3 +236,95 @@ fn rollback_needs_a_kept_archive() {
         .to_string();
     assert!(err.contains("no longer kept"), "{err}");
 }
+
+#[test]
+fn reinstalling_keeps_the_way_back() {
+    let mut w = world();
+    let id = w.instance.id.clone();
+    let mod_id = install_v1(&mut w);
+    let v2 = fixtures::write_zip(&w.tmp.path().join("in/v2.zip"), &fomod_mod("2", false));
+    let meta = ModMeta {
+        replaces: Some(mod_id.clone()),
+        ..Default::default()
+    };
+    w.lib
+        .prepare_archive(&w.game, &v2, meta, Some(&id))
+        .unwrap();
+    // Reinstalling version 2 twice adds revisions of the same archive; the
+    // archive of version 1 stays for a rollback.
+    w.lib
+        .reinstall(&w.game, &mod_id, 2, Some(&id), false)
+        .unwrap();
+    w.lib
+        .reinstall(&w.game, &mod_id, 3, Some(&id), false)
+        .unwrap();
+    w.lib.rollback(&w.game, &mod_id, Some(&id)).unwrap();
+    assert_eq!(
+        fs::read_to_string(
+            w.lib
+                .root()
+                .join("mods")
+                .join(&mod_id)
+                .join("archive/pc/mod/v.archive")
+        )
+        .unwrap(),
+        "B 1"
+    );
+
+    // Keeping one version means nothing to roll back to.
+    w.lib.set_revisions_kept(1).unwrap();
+    assert_eq!(w.lib.archive_usage().unwrap().len(), 1);
+    let err = w
+        .lib
+        .rollback(&w.game, &mod_id, Some(&id))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("No earlier version"), "{err}");
+
+    // Three versions kept: all three archives survive three updates.
+    w.lib.set_revisions_kept(3).unwrap();
+    for n in ["3", "4", "5"] {
+        let v = fixtures::write_zip(
+            &w.tmp.path().join(format!("in/v{n}.zip")),
+            &fomod_mod(n, false),
+        );
+        let meta = ModMeta {
+            replaces: Some(mod_id.clone()),
+            ..Default::default()
+        };
+        w.lib.prepare_archive(&w.game, &v, meta, Some(&id)).unwrap();
+    }
+    assert_eq!(w.lib.archive_usage().unwrap().len(), 3);
+}
+
+#[test]
+fn files_of_one_nexus_mod_stay_separate() {
+    let mut w = world();
+    let id = w.instance.id.clone();
+    let file = |n: u32| ModMeta {
+        nexus_mod_id: Some(77),
+        nexus_file_id: Some(n),
+        ..Default::default()
+    };
+    let main = fixtures::write_zip(
+        &w.tmp.path().join("in/main.zip"),
+        &vec![("main.archive".into(), b"m".to_vec())],
+    );
+    let optional = fixtures::write_zip(
+        &w.tmp.path().join("in/opt.zip"),
+        &vec![("opt.archive".into(), b"o".to_vec())],
+    );
+    w.lib
+        .install_archive(&w.game, &main, file(1), Some(&id))
+        .unwrap();
+    w.lib
+        .install_archive(&w.game, &optional, file(2), Some(&id))
+        .unwrap();
+    // Downloading the main file again updates it, not the optional one.
+    let again = w
+        .lib
+        .install_archive(&w.game, &main, file(1), Some(&id))
+        .unwrap();
+    assert!(again.replaced_existing);
+    assert_eq!(w.lib.mods_for_game(&w.game.id).unwrap().len(), 2);
+}

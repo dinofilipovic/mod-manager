@@ -74,6 +74,7 @@ fn update_check_of_50_mods_with_3_changed_makes_4_requests() {
             .iter()
             .map(|m| updates::ModUpdate {
                 mod_id: m.id.clone(),
+                revision: m.revision,
                 nexus_updated_at: Some(seen),
                 update: None,
             })
@@ -127,7 +128,7 @@ fn update_check_of_50_mods_with_3_changed_makes_4_requests() {
         .expect(0)
         .create();
 
-    let outcome = updates::run(&client(&server), &check, now).unwrap();
+    let outcome = updates::run(&client(&server), &check, now, &|| Ok(())).unwrap();
     assert_eq!(outcome.requests, 4);
     updated.assert();
     for m in &files {
@@ -193,7 +194,7 @@ fn first_check_looks_at_every_mod_and_respects_pins_and_skips() {
     }
     let check = lib.update_check(&game).unwrap().unwrap();
     assert_eq!(check.last_checked_at, None);
-    let outcome = updates::run(&client(&server), &check, 1_761_400_000).unwrap();
+    let outcome = updates::run(&client(&server), &check, 1_761_400_000, &|| Ok(())).unwrap();
     assert_eq!(outcome.requests, 3, "a full check, one file list per mod");
     no_period.assert();
     lib.apply_update_check(&outcome, None).unwrap();
@@ -208,7 +209,7 @@ fn first_check_looks_at_every_mod_and_respects_pins_and_skips() {
     let check = lib.update_check(&game).unwrap().unwrap();
     let mut check = check;
     check.last_checked_at = None;
-    let outcome = updates::run(&client(&server), &check, 1_761_400_000).unwrap();
+    let outcome = updates::run(&client(&server), &check, 1_761_400_000, &|| Ok(())).unwrap();
     lib.apply_update_check(&outcome, None).unwrap();
     let after = lib.mods_for_game(&game.id).unwrap();
     assert_eq!(after[0].update_file_id, None);
@@ -452,4 +453,117 @@ fn download_queue_survives_a_restart() {
     );
     assert_eq!(queue[0].bytes_done, 1000, "progress kept for the resume");
     assert_eq!(mm_core::queue::next_ready(&queue, now), Some(0));
+}
+
+#[test]
+fn download_starts_over_when_the_part_file_cant_be_continued() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new();
+    // Already complete: the range is past the end.
+    let dest = tmp.path().join("done.zip");
+    std::fs::write(nexus::part_path(&dest), b"whole file").unwrap();
+    let _past_end = server
+        .mock("GET", "/file/done.zip")
+        .match_header("range", "bytes=10-")
+        .with_status(416)
+        .create();
+    let _full = server
+        .mock("GET", "/file/done.zip")
+        .match_header("range", Matcher::Missing)
+        .with_body("whole file")
+        .create();
+    client(&server)
+        .download(&format!("{}/file/done.zip", server.url()), &dest, |_, _| {
+            true
+        })
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "whole file");
+
+    // The server answers a different range than asked: start over too.
+    let dest = tmp.path().join("odd.zip");
+    std::fs::write(nexus::part_path(&dest), b"abc").unwrap();
+    let _odd = server
+        .mock("GET", "/file/odd.zip")
+        .match_header("range", "bytes=3-")
+        .with_status(206)
+        .with_header("content-range", "bytes 0-5/6")
+        .with_body("abcdef")
+        .create();
+    let _odd_full = server
+        .mock("GET", "/file/odd.zip")
+        .match_header("range", Matcher::Missing)
+        .with_body("abcdef")
+        .create();
+    client(&server)
+        .download(&format!("{}/file/odd.zip", server.url()), &dest, |_, _| {
+            true
+        })
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "abcdef");
+}
+
+#[test]
+fn check_results_skip_mods_updated_meanwhile_and_respect_the_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let game = find_builtin("cyberpunk2077").unwrap();
+    let mut lib = library_with_mods(tmp.path(), 2);
+    let check = lib.update_check(&game).unwrap().unwrap();
+    let mut server = mockito::Server::new();
+    for (i, m) in check.mods.iter().enumerate() {
+        let file = i as u32 + 1;
+        server
+            .mock(
+                "GET",
+                format!(
+                    "/games/cyberpunk2077/mods/{}/files.json",
+                    m.nexus_mod_id.unwrap()
+                )
+                .as_str(),
+            )
+            .with_body(files_json(file, file + 500, 1_700_000_000))
+            .create();
+    }
+    // The budget runs out after the first request.
+    let made = std::cell::Cell::new(0);
+    let guard = || {
+        made.set(made.get() + 1);
+        if made.get() > 1 {
+            Err(mm_core::Error::Nexus(
+                "Paused to save your Nexus Mods requests".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    let err = updates::run(&client(&server), &check, 1_761_400_000, &guard).unwrap_err();
+    assert!(err.to_string().contains("Paused"), "{err}");
+
+    // A mod updated while the check ran keeps its own state.
+    let outcome = updates::run(&client(&server), &check, 1_761_400_000, &|| Ok(())).unwrap();
+    let first = check.mods[0].clone();
+    let newer = fixtures::write_zip(
+        &tmp.path().join("in/newer.zip"),
+        &vec![("x.archive".into(), b"x".to_vec())],
+    );
+    lib.install_archive(
+        &game,
+        &newer,
+        ModMeta {
+            replaces: Some(first.id.clone()),
+            nexus_mod_id: first.nexus_mod_id,
+            nexus_file_id: Some(501),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    lib.apply_update_check(&outcome, None).unwrap();
+    let after = lib.mods_for_game(&game.id).unwrap();
+    let updated = after.iter().find(|m| m.id == first.id).unwrap();
+    assert_eq!(
+        updated.update_file_id, None,
+        "the stale result wasn't applied"
+    );
+    let other = after.iter().find(|m| m.id != first.id).unwrap();
+    assert_eq!(other.update_file_id, Some(502));
 }

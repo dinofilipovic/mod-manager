@@ -3,6 +3,7 @@ import type { StepChoice } from "./StepChoice";
 
 /**
  * Choices by name (step, group, options), so they can be matched against
- * another version of the installer. Only visible steps are kept.
+ * another version of the installer. Every step is kept, hidden ones too, so
+ * steps sharing a name stay in order.
  */
 export type FomodChoices = Array<StepChoice>;

@@ -917,8 +917,7 @@ impl Library {
                 None => match (meta.nexus_mod_id, meta.nexus_file_id) {
                     (Some(mod_id), Some(file_id)) => self
                         .store
-                        .find_mod_by_nexus_id(&game.id, mod_id)?
-                        .filter(|m| m.nexus_file_id == Some(file_id)),
+                        .find_mod_by_nexus_file(&game.id, mod_id, file_id)?,
                     _ => None,
                 },
             };
@@ -978,7 +977,13 @@ impl Library {
                 nexus_file_id: record.nexus_file_id,
                 installed_at: record.installed_at,
             })?;
-            self.apply_retention()?;
+            // The install is done; a failed cleanup mustn't make it look failed.
+            let mut warnings = plan.warnings;
+            if let Err(e) = self.apply_retention() {
+                warnings.push(format!(
+                    "Couldn't delete old archives ({e}); use Clean unused in Settings."
+                ));
+            }
 
             if existing.is_none()
                 && let Some(instance_id) = job.instance_id.as_deref()
@@ -997,7 +1002,7 @@ impl Library {
             Ok(InstallOutcome {
                 record,
                 skipped: plan.skipped,
-                warnings: plan.warnings,
+                warnings,
                 replaced_existing: existing.is_some(),
                 replayed_choices,
             })
@@ -1039,6 +1044,11 @@ impl Library {
         period: Option<&str>,
     ) -> Result<UpdateSummary> {
         for m in &outcome.mods {
+            // Updated or removed while the check ran: its result is stale.
+            let current = self.store.get_mod(&m.mod_id)?;
+            if current.is_none_or(|c| c.revision != m.revision) {
+                continue;
+            }
             self.store.set_mod_checked(
                 &m.mod_id,
                 m.nexus_updated_at,
@@ -1412,18 +1422,24 @@ impl Library {
         let revisions = self.store.all_revisions()?;
         let mut kept = std::collections::HashSet::new();
         let mut dropped = std::collections::HashSet::new();
-        let mut seen: HashMap<&str, usize> = HashMap::new();
-        // Newest first per mod.
+        // Distinct archives per mod, newest first: a reinstall of the same
+        // archive doesn't push the one before it out.
+        let mut seen: HashMap<&str, Vec<i64>> = HashMap::new();
         for r in &revisions {
-            let n = seen.entry(r.mod_id.as_str()).or_default();
-            if let Some(id) = r.archive_id {
-                if *n < keep {
-                    kept.insert(id);
-                } else {
-                    dropped.insert(id);
-                }
+            let Some(id) = r.archive_id else { continue };
+            let distinct = seen.entry(r.mod_id.as_str()).or_default();
+            if !distinct.contains(&id) {
+                distinct.push(id);
             }
-            *n += 1;
+            if distinct
+                .iter()
+                .position(|a| *a == id)
+                .is_some_and(|i| i < keep)
+            {
+                kept.insert(id);
+            } else {
+                dropped.insert(id);
+            }
         }
         for id in dropped.difference(&kept) {
             self.delete_archive(*id)?;

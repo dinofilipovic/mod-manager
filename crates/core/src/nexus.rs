@@ -76,7 +76,7 @@ pub struct NexusUser {
     pub profile_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct NexusModInfo {
     pub mod_id: u32,
@@ -90,7 +90,7 @@ pub struct NexusModInfo {
     pub domain_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct NexusFile {
     pub file_id: u32,
@@ -160,18 +160,16 @@ impl RateLimits {
         })
     }
 
-    /// Requests that can still be made now: the daily ones, then the hourly ones.
+    /// Requests that can still be made now: the daily ones, and once those
+    /// are used up, the hourly ones.
     pub fn available(&self) -> u32 {
-        if self.daily_remaining > 0 {
-            self.daily_remaining
-        } else {
-            self.hourly_remaining
-        }
+        self.daily_remaining.max(self.hourly_remaining)
     }
 
-    /// When more requests become available again, if known.
+    /// When more requests become available again, if known: the hourly ones
+    /// come back first.
     pub fn next_reset(&self) -> Option<i64> {
-        if self.daily_remaining > 0 {
+        if self.daily_remaining > self.hourly_remaining {
             self.daily_reset
         } else {
             self.hourly_reset
@@ -507,16 +505,37 @@ impl NexusClient {
         mut progress: impl FnMut(u64, Option<u64>) -> bool,
     ) -> Result<crate::archives::Hashes> {
         let part = part_path(dest);
-        let have = fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
-        let mut request = self.http.get(url);
+        let mut have = fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+        let request = |from: u64| {
+            let mut request = self.http.get(url);
+            if from > 0 {
+                request = request.header(reqwest::header::RANGE, format!("bytes={from}-"));
+            }
+            request.send().map_err(|e| {
+                Error::Network(format!(
+                    "Couldn't reach the download server ({e}). It is retried automatically."
+                ))
+            })
+        };
+        let mut response = request(have)?;
         if have > 0 {
-            request = request.header(reqwest::header::RANGE, format!("bytes={have}-"));
+            // A partial file that is already complete (or longer than the
+            // file) gets 416; a range starting elsewhere can't be appended.
+            // Either way, start over.
+            let status = response.status();
+            let starts_at = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(content_range_start);
+            if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE
+                || (status == reqwest::StatusCode::PARTIAL_CONTENT && starts_at != Some(have))
+            {
+                let _ = fs::remove_file(&part);
+                have = 0;
+                response = request(0)?;
+            }
         }
-        let mut response = request.send().map_err(|e| {
-            Error::Network(format!(
-                "Couldn't reach the download server ({e}). It is retried automatically."
-            ))
-        })?;
         let status = response.status();
         let resuming = have > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
         if !status.is_success() {
@@ -581,6 +600,18 @@ impl NexusClient {
         fs::rename(&part, dest).map_err(|e| Error::io(dest, e))?;
         Ok(hasher.finish())
     }
+}
+
+/// The first byte of a `Content-Range: bytes <start>-<end>/<total>` header.
+fn content_range_start(value: &str) -> Option<u64> {
+    value
+        .trim()
+        .strip_prefix("bytes ")?
+        .split('-')
+        .next()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// The error message of a download stopped by the user.

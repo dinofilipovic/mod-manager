@@ -165,8 +165,27 @@ fn run(app: &AppHandle, download: Download) -> Result<DownloadStatus, Error> {
     let client = NexusClient::new(&api_key, env!("CARGO_PKG_VERSION"))?;
     let domain = &download.game_domain;
     let (mod_id, file_id) = (download.nexus_mod_id, download.nexus_file_id);
-    let info = client.mod_info(domain, mod_id)?;
-    let file = client.file_info(domain, mod_id, file_id)?;
+    let details = client
+        .mod_info(domain, mod_id)
+        .and_then(|info| Ok((info, client.file_info(domain, mod_id, file_id)?)));
+    // A downloaded archive installs without Nexus: what is known suffices.
+    let (info, file) = match (details, download.archive_id) {
+        (Ok(found), _) => found,
+        (Err(_), Some(_)) => (
+            nexus::NexusModInfo {
+                mod_id,
+                name: Some(download.name.clone()),
+                ..Default::default()
+            },
+            nexus::NexusFile {
+                file_id,
+                version: download.version.clone(),
+                file_name: download.file_name.clone(),
+                ..Default::default()
+            },
+        ),
+        (Err(e), None) => return Err(e),
+    };
     let name = nexus::display_name(&info, Some(&file)).unwrap_or_else(|| format!("Mod {mod_id}"));
     let file_name = file
         .file_name

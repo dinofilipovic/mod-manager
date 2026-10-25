@@ -484,6 +484,24 @@ impl Store {
             .optional()?)
     }
 
+    /// The installed mod made from exactly this Nexus file.
+    pub fn find_mod_by_nexus_file(
+        &self,
+        game_id: &str,
+        nexus_mod_id: u32,
+        nexus_file_id: u32,
+    ) -> Result<Option<ModRecord>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT * FROM mods WHERE game_id = ?1 AND nexus_mod_id = ?2 AND nexus_file_id = ?3
+                 ORDER BY installed_at DESC LIMIT 1",
+                params![game_id, nexus_mod_id, nexus_file_id],
+                row_to_mod,
+            )
+            .optional()?)
+    }
+
     pub fn mod_files(&self, mod_id: &str) -> Result<Vec<String>> {
         let mut stmt = self
             .conn

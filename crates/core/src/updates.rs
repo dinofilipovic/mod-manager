@@ -35,6 +35,8 @@ pub struct UpdateCheck {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModUpdate {
     pub mod_id: String,
+    /// The revision that was looked at; a newer one makes this result stale.
+    pub revision: u32,
     /// The newest file upload seen for the mod, Unix seconds.
     pub nexus_updated_at: Option<i64>,
     /// A newer file, unless the mod is pinned or the file ignored.
@@ -104,7 +106,8 @@ pub fn relevant_changelog(
 /// The `updated.json` period covering everything since `last`, or `None`
 /// when a full check is needed.
 pub fn period_since(last: Option<i64>, now: i64) -> Option<&'static str> {
-    let elapsed = now - last?;
+    // An hour of overlap: Nexus caches `updated.json` for a few minutes.
+    let elapsed = now - last? + 3600;
     match elapsed {
         e if e < 0 => None,
         e if e <= DAY => Some("1d"),
@@ -115,8 +118,14 @@ pub fn period_since(last: Option<i64>, now: i64) -> Option<&'static str> {
 }
 
 /// Checks the mods linked to Nexus files. Pinned mods are looked at too (to
-/// keep their dates current) but never get an update.
-pub fn run(client: &NexusClient, check: &UpdateCheck, now: i64) -> Result<CheckOutcome> {
+/// keep their dates current) but never get an update. `before_request` runs
+/// before each request and can stop the check (the request budget).
+pub fn run(
+    client: &NexusClient,
+    check: &UpdateCheck,
+    now: i64,
+    before_request: &dyn Fn() -> Result<()>,
+) -> Result<CheckOutcome> {
     let linked: Vec<&ModRecord> = check
         .mods
         .iter()
@@ -127,6 +136,7 @@ pub fn run(client: &NexusClient, check: &UpdateCheck, now: i64) -> Result<CheckO
     let candidates: Vec<&ModRecord> = match period {
         None => linked,
         Some(period) => {
+            before_request()?;
             let updated: HashMap<u32, i64> = client
                 .updated_mods(&check.game_domain, period)?
                 .into_iter()
@@ -154,16 +164,18 @@ pub fn run(client: &NexusClient, check: &UpdateCheck, now: i64) -> Result<CheckO
         let files = match lists.entry(nexus_mod) {
             std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::btree_map::Entry::Vacant(e) => {
+                before_request()?;
                 requests += 1;
                 e.insert(client.mod_files(&check.game_domain, nexus_mod)?)
             }
         };
-        let update = newer_file(files, file_id)
+        let update = newer_file(files, file_id, m.version.as_deref())
             .filter(|_| !m.pinned)
             .filter(|f| Some(f.file_id) != m.ignored_update_file_id)
             .map(|f| (f.file_id, f.version.clone()));
         mods.push(ModUpdate {
             mod_id: m.id.clone(),
+            revision: m.revision,
             nexus_updated_at: files
                 .files
                 .iter()
@@ -182,8 +194,13 @@ pub fn run(client: &NexusClient, check: &UpdateCheck, now: i64) -> Result<CheckO
 
 /// The file that replaces `file_id`: the end of the author's update chain,
 /// or when there is none and the installed file is a main file, the newest
-/// main file with a higher version (newer upload breaks ties).
-pub fn newer_file(files: &NexusFileList, file_id: u32) -> Option<&NexusFile> {
+/// main file with a higher version (newer upload breaks ties). When the
+/// installed file is gone from Nexus, `installed_version` is compared.
+pub fn newer_file<'a>(
+    files: &'a NexusFileList,
+    file_id: u32,
+    installed_version: Option<&str>,
+) -> Option<&'a NexusFile> {
     if let Some(newer) = files.newer_than(file_id) {
         return Some(newer);
     }
@@ -196,7 +213,9 @@ pub fn newer_file(files: &NexusFileList, file_id: u32) -> Option<&NexusFile> {
     ) {
         return None;
     }
-    let current = installed.and_then(|f| f.version.as_deref())?;
+    let current = installed
+        .and_then(|f| f.version.as_deref())
+        .or(installed_version)?;
     files
         .files
         .iter()
@@ -299,6 +318,11 @@ mod tests {
         let now = 100 * DAY;
         assert_eq!(period_since(None, now), None);
         assert_eq!(period_since(Some(now - 3600), now), Some("1d"));
+        assert_eq!(
+            period_since(Some(now - DAY + 1800), now),
+            Some("1w"),
+            "an hour of overlap"
+        );
         assert_eq!(period_since(Some(now - 3 * DAY), now), Some("1w"));
         assert_eq!(period_since(Some(now - 20 * DAY), now), Some("1m"));
         assert_eq!(period_since(Some(now - 40 * DAY), now), None);
@@ -317,14 +341,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            newer_file(&list, 1).unwrap().file_id,
+            newer_file(&list, 1, None).unwrap().file_id,
             3,
             "same version: newer upload"
         );
-        assert!(newer_file(&list, 3).is_none());
+        assert!(newer_file(&list, 3, None).is_none());
         assert!(
-            newer_file(&list, 4).is_none(),
+            newer_file(&list, 4, None).is_none(),
             "optional files aren't compared"
         );
+        // The installed file was deleted from Nexus: its version still counts.
+        assert_eq!(newer_file(&list, 99, Some("1.1")).unwrap().file_id, 3);
+        assert!(newer_file(&list, 99, None).is_none());
     }
 }

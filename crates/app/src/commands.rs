@@ -158,10 +158,13 @@ pub async fn get_loadout(app: AppHandle, instance_id: String) -> LoadoutResult {
         let (instance, game, _) = state.resolve(&instance_id)?;
         lock(&state.current_instance).insert(instance.game_id.clone(), instance.id.clone());
         let loadout = loadout(state, &instance_id)?;
-        // A game update was just noticed: mods may need updates too.
-        let previous =
-            lock(&state.seen_game_updates).insert(instance.id.clone(), loadout.game.updated_at);
-        if previous.is_some_and(|p| p != loadout.game.updated_at)
+        // The game was updated since its mods were last checked (also while
+        // the app was closed): mods may need updates too.
+        let checked = lock(&state.library).last_update_check(&game.id);
+        if loadout
+            .game
+            .updated_at
+            .is_some_and(|updated| checked.is_none_or(|c| c < updated))
             && lock(&state.library).auto_update_check()
         {
             spawn_update_check(app, game.clone());
@@ -736,27 +739,45 @@ pub fn run_update_check(
     let key = nexus::api_key::load()
         .map_err(err)?
         .ok_or("Connect your Nexus Mods account in Settings to check for updates.")?;
-    if automatic {
-        nexus::check_budget(mm_core::library::now()).map_err(err)?;
-    }
+    // Automatic checks stop before the remaining requests run low.
+    let budget = || {
+        if automatic {
+            nexus::check_budget(mm_core::library::now())
+        } else {
+            Ok(())
+        }
+    };
+    budget().map_err(err)?;
     let client = nexus_client(&key)?;
     // Link mods installed from archives first, so they get checked too: by
     // the archive's MD5, then by the mod id in its file name.
     let unlinked = lock(&state.library)
         .unlinked_archives(&game.id)
         .map_err(err)?;
+    let mut lookups = 0;
     for (mod_id, md5, archive_name) in unlinked {
+        budget().map_err(err)?;
+        lookups += 1;
         let found = match client.identify_by_md5(&domain, &md5) {
             Ok(Some(found)) => Some(found),
-            Ok(None) => archive_name
-                .as_deref()
-                .and_then(|name| client.identify(&domain, name).ok().flatten()),
-            Err(e) => return Err(err(e)),
+            Ok(None) => {
+                // The file name lookup costs two more requests.
+                lookups += 2;
+                archive_name
+                    .as_deref()
+                    .and_then(|name| client.identify(&domain, name).ok().flatten())
+            }
+            // Offline: the check below would fail the same way.
+            Err(e @ mm_core::Error::Network(_)) => return Err(err(e)),
+            Err(_) => None,
         };
         let library = lock(&state.library);
-        match found {
-            Some(found) => library.apply_nexus_match(&mod_id, &found).map_err(err)?,
-            None => library.mark_lookup_failed(&mod_id).map_err(err)?,
+        if let Some(found) = &found {
+            library.apply_nexus_match(&mod_id, found).map_err(err)?;
+        }
+        // Without the exact file it still can't be checked: don't ask again for a week.
+        if found.is_none_or(|f| f.file_id.is_none()) {
+            library.mark_lookup_failed(&mod_id).map_err(err)?;
         }
     }
     let Some(check) = lock(&state.library).update_check(game).map_err(err)? else {
@@ -764,12 +785,14 @@ pub fn run_update_check(
     };
     let now = mm_core::library::now();
     let period = updates::period_since(check.last_checked_at, now);
-    let result = updates::run(&client, &check, now);
+    let result = updates::run(&client, &check, now, &budget);
     let library = lock(&state.library);
     let _ = library.save_rate_limits();
-    library
+    let mut summary = library
         .apply_update_check(&result.map_err(err)?, period)
-        .map_err(err)
+        .map_err(err)?;
+    summary.requests += lookups;
+    Ok(summary)
 }
 
 /// The changelog of a mod's update (or its latest entries), from the cache
@@ -803,7 +826,6 @@ pub async fn mod_changelog(
                 let key = nexus::api_key::load()
                     .map_err(err)?
                     .ok_or("Connect your Nexus Mods account in Settings to read changelogs.")?;
-                nexus::check_budget(now).map_err(err)?;
                 let entries = nexus_client(&key)?
                     .changelogs(&domain, nexus_mod)
                     .map_err(err)?;
@@ -1024,14 +1046,27 @@ pub async fn finish_fomod(
         let job = lock(&state.library)
             .take_fomod(&token, &selections)
             .map_err(err)?;
-        let staged = job.stage(game).map_err(err)?;
-        let outcome = match lock(&state.library)
-            .complete_install(game, mm_core::library::Extracted::Files(staged))
-            .map_err(err)?
-        {
-            Prepared::Installed(outcome) => outcome,
-            Prepared::NeedsChoices(_) => {
-                return Err("The installer asked again unexpectedly.".into());
+        let installed = job.stage(game).and_then(|staged| {
+            lock(&state.library).complete_install(game, mm_core::library::Extracted::Files(staged))
+        });
+        let outcome = match installed {
+            Ok(Prepared::Installed(outcome)) => outcome,
+            other => {
+                let message = match other {
+                    Err(e) => e.to_string(),
+                    _ => "The installer asked again unexpectedly.".into(),
+                };
+                // The installer is gone; its download can start over from the kept archive.
+                if let Some(download) = lock(&state.fomod_downloads).remove(&token) {
+                    downloads::update(app, &download, |d| {
+                        d.status = mm_core::nexus::DownloadStatus::Failed {
+                            message: format!(
+                                "Installing failed: {message} Press Retry to choose the options again."
+                            ),
+                        }
+                    });
+                }
+                return Err(format!("{message} Try installing it again."));
             }
         };
         if let Some(download) = lock(&state.fomod_downloads).remove(&token) {

@@ -294,7 +294,8 @@ pub fn default_selections(installer: &FomodInstaller) -> Selections {
 }
 
 /// Choices by name (step, group, options), so they can be matched against
-/// another version of the installer. Only visible steps are kept.
+/// another version of the installer. Every step is kept, hidden ones too, so
+/// steps sharing a name stay in order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct FomodChoices(pub Vec<StepChoice>);
@@ -325,28 +326,26 @@ pub struct Replay {
 
 /// The selections as names.
 pub fn name_choices(installer: &FomodInstaller, selections: &Selections) -> FomodChoices {
-    let visible = visible_steps(installer, selections);
     FomodChoices(
-        visible
-            .into_iter()
-            .map(|si| {
-                let step = &installer.steps[si];
-                StepChoice {
-                    step: step.name.clone(),
-                    groups: step
-                        .groups
-                        .iter()
-                        .enumerate()
-                        .map(|(gi, group)| GroupChoice {
-                            group: group.name.clone(),
-                            options: selections
-                                .get(si, gi)
-                                .iter()
-                                .filter_map(|&oi| group.options.get(oi).map(|o| o.name.clone()))
-                                .collect(),
-                        })
-                        .collect(),
-                }
+        installer
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(si, step)| StepChoice {
+                step: step.name.clone(),
+                groups: step
+                    .groups
+                    .iter()
+                    .enumerate()
+                    .map(|(gi, group)| GroupChoice {
+                        group: group.name.clone(),
+                        options: selections
+                            .get(si, gi)
+                            .iter()
+                            .filter_map(|&oi| group.options.get(oi).map(|o| o.name.clone()))
+                            .collect(),
+                    })
+                    .collect(),
             })
             .collect(),
     )
@@ -357,15 +356,28 @@ pub fn name_choices(installer: &FomodInstaller, selections: &Selections) -> Fomo
 /// spaces. Groups without a match keep their default.
 pub fn replay(installer: &FomodInstaller, saved: &FomodChoices) -> Replay {
     let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
+    // Steps (and groups) sharing a name are told apart by their position
+    // among the ones with that name.
+    let nth = |names: &[&str], i: usize| names[..i].iter().filter(|n| same(n, names[i])).count();
     let mut selections = default_selections(installer);
     // Whether each group (`[step][group]`) matched with all its saved options.
     let mut matched: Vec<Vec<bool>> = Vec::new();
+    let step_names: Vec<&str> = installer.steps.iter().map(|s| s.name.as_str()).collect();
     for (si, step) in installer.steps.iter().enumerate() {
-        let saved_step = saved.0.iter().find(|s| same(&s.step, &step.name));
+        let saved_step = saved
+            .0
+            .iter()
+            .filter(|s| same(&s.step, &step.name))
+            .nth(nth(&step_names, si));
+        let group_names: Vec<&str> = step.groups.iter().map(|g| g.name.as_str()).collect();
         let mut step_matched = Vec::new();
         for (gi, group) in step.groups.iter().enumerate() {
-            let saved_group =
-                saved_step.and_then(|s| s.groups.iter().find(|g| same(&g.group, &group.name)));
+            let saved_group = saved_step.and_then(|s| {
+                s.groups
+                    .iter()
+                    .filter(|g| same(&g.group, &group.name))
+                    .nth(nth(&group_names, gi))
+            });
             let Some(saved_group) = saved_group else {
                 step_matched.push(false);
                 continue;
@@ -1176,7 +1188,7 @@ mod tests {
         let i = installer();
         let dark = sel(vec![vec![vec![1], vec![]], vec![vec![1]]]);
         let named = name_choices(&i, &dark);
-        assert_eq!(named.0.len(), 2, "both steps are visible");
+        assert_eq!(named.0.len(), 2);
         let again = replay(&i, &named);
         assert!(again.complete);
         assert_eq!(again.selections, dark);
@@ -1195,8 +1207,20 @@ mod tests {
         // Light hides step 2, which then needn't match anything.
         let light = sel(vec![vec![vec![0], vec![]], vec![vec![0]]]);
         let named = name_choices(&i, &light);
-        assert_eq!(named.0.len(), 1);
         assert!(replay(&i, &named).complete);
+        // Without step 2 saved, it still matches while step 2 stays hidden.
+        let mut only_first = named.clone();
+        only_first.0.truncate(1);
+        assert!(replay(&i, &only_first).complete);
+
+        // Two steps with the same name keep their own choices.
+        let twins =
+            parse_module_config(TWO_STEPS.replace("Dark Options", "Main").as_bytes()).unwrap();
+        assert_eq!(twins.steps[0].name, twins.steps[1].name);
+        let chosen = sel(vec![vec![vec![1], vec![]], vec![vec![1]]]);
+        let again = replay(&twins, &name_choices(&twins, &chosen));
+        assert!(again.complete);
+        assert_eq!(again.selections, chosen);
     }
 
     #[test]
