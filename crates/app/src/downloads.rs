@@ -286,12 +286,15 @@ fn run(app: &AppHandle, download: Download) -> Result<DownloadStatus, Error> {
     let extracted = job.extract(&game)?;
     let prepared = lock(&state.library).complete_install(&game, extracted)?;
     match prepared {
-        Prepared::Installed(outcome) => Ok(DownloadStatus::Done {
-            mod_id: outcome.record.id,
-            replaced_existing: outcome.replaced_existing,
-            replayed_choices: outcome.replayed_choices,
-            warnings: outcome.warnings,
-        }),
+        Prepared::Installed(outcome) => {
+            fetch_requirements_later(app, &game, mod_id);
+            Ok(DownloadStatus::Done {
+                mod_id: outcome.record.id,
+                replaced_existing: outcome.replaced_existing,
+                replayed_choices: outcome.replayed_choices,
+                warnings: outcome.warnings,
+            })
+        }
         Prepared::NeedsChoices(request) => {
             lock(&state.fomod_downloads).insert(request.token.clone(), download.id.clone());
             let _ = app.emit(FOMOD_REQUESTED, request.clone());
@@ -300,6 +303,33 @@ fn run(app: &AppHandle, download: Download) -> Result<DownloadStatus, Error> {
             })
         }
     }
+}
+
+/// Looks up a newly installed mod's requirements on Nexus in the
+/// background; failing to get them doesn't fail the download.
+pub fn fetch_requirements_later(
+    app: &AppHandle,
+    game: &mm_core::GameDefinition,
+    nexus_mod_id: u32,
+) {
+    let app = app.clone();
+    let game = game.clone();
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        let result = crate::commands::fetch_requirements_for(
+            &state,
+            &game,
+            true,
+            Some(&[nexus_mod_id]),
+            true,
+        );
+        match result {
+            Ok(_) => {
+                let _ = app.emit(LIBRARY_CHANGED, ());
+            }
+            Err(e) => eprintln!("couldn't get the requirements of mod {nexus_mod_id}: {e}"),
+        }
+    });
 }
 
 /// Puts a failed download back in the queue. An expired `nxm://` key is

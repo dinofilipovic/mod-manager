@@ -152,29 +152,29 @@ pub fn parse_collection_link(link: &str) -> Result<CollectionLink> {
     })
 }
 
-/// Fetches the list of mod files in a collection revision. The API key is
-/// optional: public collections can be read without one.
-pub fn fetch_collection(
+/// The v2 API address; `MM_NEXUS_GRAPHQL_URL` points it at a test server.
+pub fn graphql_url() -> String {
+    std::env::var("MM_NEXUS_GRAPHQL_URL").unwrap_or_else(|_| GRAPHQL.to_string())
+}
+
+/// Sends a GraphQL request to `url` and returns the response body, or a
+/// user-facing error. The API key is optional for public data.
+pub fn post_graphql(
+    url: &str,
     api_key: Option<&str>,
-    link: &CollectionLink,
+    query: &str,
+    variables: Value,
     app_version: &str,
-) -> Result<Collection> {
+) -> Result<String> {
     let http = reqwest::blocking::Client::builder()
         .user_agent(format!("{APP_NAME}/{app_version}"))
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| Error::Nexus(e.to_string()))?;
-    let body = json!({
-        "query": QUERY,
-        "variables": {
-            "slug": link.slug,
-            "revision": link.revision,
-            "domainName": link.game_domain,
-        },
-    });
+    let body = json!({ "query": query, "variables": variables });
     let mut request = http
-        .post(GRAPHQL)
+        .post(url)
         .header("Application-Name", APP_NAME)
         .header("Application-Version", app_version)
         .json(&body);
@@ -182,7 +182,7 @@ pub fn fetch_collection(
         request = request.header("apikey", key);
     }
     let response = request.send().map_err(|e| {
-        Error::Nexus(if e.is_timeout() {
+        Error::Network(if e.is_timeout() {
             "Nexus Mods didn't answer in time. Check your internet connection and try again.".into()
         } else {
             format!("Couldn't reach Nexus Mods. Check your internet connection. ({e})")
@@ -202,14 +202,33 @@ pub fn fetch_collection(
             .ok()
             .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
             .unwrap_or(text);
-        return Err(Error::Nexus(match status.as_u16() {
-            401 => "Nexus Mods didn't accept this API key. Copy the whole Personal API Key from your Nexus account page and try again.".into(),
-            403 => format!("Nexus Mods refused the request: {message}"),
-            404 => "Collection not found.".into(),
-            429 => "Nexus Mods rate limit reached; try again later.".into(),
-            code => format!("Nexus Mods error {code}: {message}"),
-        }));
+        return Err(match status.as_u16() {
+            401 => Error::Nexus("Nexus Mods didn't accept this API key. Copy the whole Personal API Key from your Nexus account page and try again.".into()),
+            403 => Error::Nexus(format!("Nexus Mods refused the request: {message}")),
+            404 => Error::Nexus("Collection not found.".into()),
+            429 => Error::Network("Nexus Mods rate limit reached; try again later.".into()),
+            code if status.is_server_error() => Error::Network(format!(
+                "Nexus Mods had a problem ({code}). Try again in a few minutes."
+            )),
+            code => Error::Nexus(format!("Nexus Mods error {code}: {message}")),
+        });
     }
+    Ok(text)
+}
+
+/// Fetches the list of mod files in a collection revision. The API key is
+/// optional: public collections can be read without one.
+pub fn fetch_collection(
+    api_key: Option<&str>,
+    link: &CollectionLink,
+    app_version: &str,
+) -> Result<Collection> {
+    let variables = json!({
+        "slug": link.slug,
+        "revision": link.revision,
+        "domainName": link.game_domain,
+    });
+    let text = post_graphql(&graphql_url(), api_key, QUERY, variables, app_version)?;
     parse_collection_response(&text)
 }
 
@@ -272,7 +291,7 @@ pub fn parse_collection_response(body: &str) -> Result<Collection> {
 }
 
 /// The first entry of a GraphQL `errors` array as a user-facing message.
-fn graphql_error(body: &str) -> Option<String> {
+pub(crate) fn graphql_error(body: &str) -> Option<String> {
     let value: Value = serde_json::from_str(body).ok()?;
     let error = value.get("errors")?.as_array()?.first()?;
     let message = error

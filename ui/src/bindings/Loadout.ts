@@ -24,4 +24,8 @@ frameworks: Array<FrameworkStatus>, game: GameState,
 /**
  * How `.archive` mods are ordered; `None` if the game has no choice.
  */
-archive_order: ArchiveOrder | null, };
+archive_order: ArchiveOrder | null, 
+/**
+ * Groups of enabled mods that need each other in a circle.
+ */
+dependency_cycles: Array<Array<string>>, };

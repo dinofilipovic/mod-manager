@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use mm_core::archives::{ArchiveRetention, ModArchiveSize};
 use mm_core::collections::{self, Collection};
+use mm_core::dependencies::{DependencyKind, DependencyState};
 use mm_core::deploy::{DeployReport, DeploymentCheck};
 use mm_core::fomod::Selections;
 use mm_core::health::LogReport;
@@ -1075,6 +1076,9 @@ pub async fn finish_fomod(
                 return Err(format!("{message} Try installing it again."));
             }
         };
+        if let Some(nexus_mod) = outcome.record.nexus_mod_id {
+            downloads::fetch_requirements_later(app, game, nexus_mod);
+        }
         if let Some(download) = lock(&state.fomod_downloads).remove(&token) {
             let done = mm_core::nexus::DownloadStatus::Done {
                 mod_id: outcome.record.id.clone(),
@@ -1102,6 +1106,186 @@ pub async fn cancel_fomod(app: AppHandle, token: String) -> CommandResult<()> {
             });
         }
         Ok(())
+    })
+    .await
+}
+
+// Requirements
+
+/// Asks Nexus for the requirements on the mod pages of the game's linked
+/// mods (all of them with `refresh`, else ones not asked yet).
+#[tauri::command]
+pub async fn fetch_requirements(
+    app: AppHandle,
+    instance_id: String,
+    refresh: bool,
+) -> CommandResult<RequirementsResult> {
+    blocking(app, move |_, state| {
+        let (_, game, _) = state.resolve(&instance_id)?;
+        let updated = fetch_requirements_for(state, game, refresh, None, false)?;
+        Ok(RequirementsResult {
+            updated,
+            loadout: loadout(state, &instance_id)?,
+        })
+    })
+    .await
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct RequirementsResult {
+    /// Mods whose requirements were looked up.
+    pub updated: u32,
+    pub loadout: Loadout,
+}
+
+/// Looks up and records Nexus requirements: of `only` (Nexus mod ids) or of
+/// every linked mod due. `automatic` lookups respect the request budget.
+pub fn fetch_requirements_for(
+    state: &AppState,
+    game: &GameDefinition,
+    refresh: bool,
+    only: Option<&[u32]>,
+    automatic: bool,
+) -> CommandResult<u32> {
+    let domain = game
+        .stores
+        .nexus_domain
+        .clone()
+        .ok_or("This game isn't on Nexus Mods.")?;
+    if automatic {
+        nexus::check_budget(mm_core::library::now()).map_err(err)?;
+    }
+    let ids: Vec<u32> = match only {
+        Some(ids) => ids.to_vec(),
+        None => lock(&state.library)
+            .requirement_targets(&game.id, refresh)
+            .map_err(err)?
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect(),
+    };
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    // Public data: works without an account too, but sends the key when there is one.
+    let key = nexus::api_key::load().ok().flatten();
+    let found = mm_core::dependencies::fetch_requirements(
+        &mm_core::collections::graphql_url(),
+        key.as_deref(),
+        &domain,
+        &ids,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .map_err(err)?;
+    lock(&state.library)
+        .apply_nexus_requirements(&game.id, &found)
+        .map_err(err)
+}
+
+/// Adds a requirement: a mod of the library or a Nexus mod id.
+#[tauri::command]
+pub async fn add_dependency(
+    app: AppHandle,
+    instance_id: String,
+    mod_id: String,
+    kind: DependencyKind,
+    target: String,
+    optional: bool,
+) -> LoadoutResult {
+    blocking(app, move |_, state| {
+        lock(&state.library)
+            .add_user_dependency(&mod_id, kind, &target, optional)
+            .map_err(err)?;
+        loadout(state, &instance_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn remove_dependency(
+    app: AppHandle,
+    instance_id: String,
+    mod_id: String,
+    kind: DependencyKind,
+    target: String,
+) -> LoadoutResult {
+    blocking(app, move |_, state| {
+        lock(&state.library)
+            .remove_user_dependency(&mod_id, kind, &target)
+            .map_err(err)?;
+        loadout(state, &instance_id)
+    })
+    .await
+}
+
+/// Gets every missing requirement of the enabled mods that is on Nexus:
+/// queued downloads of its newest main file (Premium), or its page (free).
+#[tauri::command]
+pub async fn get_missing(app: AppHandle, instance_id: String) -> CommandResult<UpdateAllResult> {
+    blocking(app, move |app, state| {
+        let (_, game, _) = state.resolve(&instance_id)?;
+        let domain = game
+            .stores
+            .nexus_domain
+            .clone()
+            .ok_or("This game isn't on Nexus Mods.")?;
+        let current = loadout(state, &instance_id)?;
+        let mut wanted: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+        for m in current.mods.iter().filter(|m| m.enabled) {
+            for d in m.requires.iter().filter(|d| d.is_unmet()) {
+                // Disabled ones only need enabling.
+                if matches!(d.state, DependencyState::Disabled { .. }) {
+                    continue;
+                }
+                if let Some(id) = d.nexus_mod_id {
+                    wanted.entry(id).or_insert_with(|| d.name.clone());
+                }
+            }
+        }
+        let key = nexus::api_key::load()
+            .map_err(err)?
+            .ok_or("Connect your Nexus Mods account in Settings first.")?;
+        let client = nexus_client(&key)?;
+        let premium = client.validate().map_err(err)?.is_premium;
+        let mut result = UpdateAllResult {
+            queued: 0,
+            links: Vec::new(),
+        };
+        for (nexus_mod, name) in wanted {
+            let main = premium
+                .then(|| client.mod_files(&domain, nexus_mod).ok())
+                .flatten()
+                .and_then(|files| {
+                    files
+                        .files
+                        .into_iter()
+                        .filter(|f| f.category_name.as_deref() == Some("MAIN"))
+                        .max_by_key(|f| f.uploaded_timestamp)
+                });
+            match main {
+                Some(file) => {
+                    downloads::start(
+                        app,
+                        Request {
+                            game_domain: domain.clone(),
+                            mod_id: nexus_mod,
+                            file_id: file.file_id,
+                            key: None,
+                            expires: None,
+                            replaces: None,
+                        },
+                    )?;
+                    result.queued += 1;
+                }
+                None => result.links.push(UpdateLink {
+                    mod_name: name,
+                    version: None,
+                    url: format!("{}?tab=files", nexus::mod_page_url(&domain, nexus_mod)),
+                }),
+            }
+        }
+        Ok(result)
     })
     .await
 }

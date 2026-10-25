@@ -1,15 +1,12 @@
 query ModRequirements($ids: [CompositeDomainWithIdInput!]!) {
-  legacyModsByDomain(ids: $ids) {
+  legacyModsByDomain(ids: $ids, count: 50) {
     nodes {
       modId
-      name
-      version
-      game { domainName }
+      gameId
       modRequirements {
         nexusRequirements {
-          nodes { id modId modName gameId externalRequirement notes url }
+          nodes { modId modName gameId externalRequirement notes url }
         }
-        dlcRequirements { notes gameExpansion { name } }
       }
     }
   }

@@ -7,6 +7,7 @@ use serde::Serialize;
 use ts_rs::TS;
 
 use crate::archives::{ArchiveRecord, ArchiveSource};
+use crate::dependencies::{Dependency, DependencyKind, DependencySource};
 use crate::error::Result;
 use crate::nexus::{Changelog, Download, DownloadStatus};
 
@@ -129,6 +130,18 @@ CREATE TABLE downloads (
     expires INTEGER,
     archive_id INTEGER,
     created_at INTEGER NOT NULL
+);
+
+CREATE TABLE mod_dependencies (
+    mod_id TEXT NOT NULL REFERENCES mods(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    target TEXT NOT NULL,
+    min_version TEXT,
+    optional INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL,
+    notes TEXT,
+    url TEXT,
+    PRIMARY KEY (mod_id, kind, target, source)
 );
 
 CREATE TABLE changelogs (
@@ -600,6 +613,62 @@ impl Store {
              WHERE id = ?1",
             params![id, file_id],
         )?;
+        Ok(())
+    }
+
+    // Requirements
+
+    /// The recorded requirements of a game's mods.
+    pub fn dependencies(&self, game_id: &str) -> Result<Vec<Dependency>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.mod_id, d.kind, d.target, d.min_version, d.optional, d.source, d.notes, d.url
+             FROM mod_dependencies d JOIN mods m ON m.id = d.mod_id
+             WHERE m.game_id = ?1 ORDER BY d.mod_id, d.source, d.target",
+        )?;
+        let rows = stmt.query_map([game_id], |r| {
+            Ok(Dependency {
+                mod_id: r.get(0)?,
+                kind: DependencyKind::parse(&r.get::<_, String>(1)?),
+                target: r.get(2)?,
+                min_version: r.get(3)?,
+                optional: r.get(4)?,
+                source: DependencySource::parse(&r.get::<_, String>(5)?),
+                notes: r.get(6)?,
+                url: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Replaces a mod's requirements from one source.
+    pub fn set_dependencies(
+        &mut self,
+        mod_id: &str,
+        source: DependencySource,
+        deps: &[Dependency],
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM mod_dependencies WHERE mod_id = ?1 AND source = ?2",
+            params![mod_id, source.as_str()],
+        )?;
+        for d in deps {
+            tx.execute(
+                "INSERT OR REPLACE INTO mod_dependencies (mod_id, kind, target, min_version, optional, source, notes, url)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    mod_id,
+                    d.kind.as_str(),
+                    d.target,
+                    d.min_version,
+                    d.optional,
+                    source.as_str(),
+                    d.notes,
+                    d.url
+                ],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 

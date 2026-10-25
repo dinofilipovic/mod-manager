@@ -3,6 +3,8 @@ import { api, errorMessage, nexusUrls, openExternal, reveal } from "../api";
 import type { ArchiveOrder } from "../bindings/ArchiveOrder";
 import type { DeploymentCheck } from "../bindings/DeploymentCheck";
 import type { DriftKind } from "../bindings/DriftKind";
+import type { UpdateLink } from "../bindings/UpdateLink";
+import { isUnmet, stateLabel } from "../deps";
 import type { Loadout } from "../bindings/Loadout";
 import type { LogReport } from "../bindings/LogReport";
 import type { FrameworkStatus } from "../bindings/FrameworkStatus";
@@ -116,6 +118,8 @@ export function HealthView({
       </section>
 
       <GameFolderCheck instanceId={instanceId} deployedAt={loadout.deployed_at} />
+
+      <RequirementsCard instanceId={instanceId} loadout={loadout} onLoadout={onLoadout} />
 
       <section className="card">
         <h2>Frameworks</h2>
@@ -408,6 +412,132 @@ function GameFolderCheck({ instanceId, deployedAt }: { instanceId: string; deplo
             </div>
           );
         })}
+    </section>
+  );
+}
+
+/** Requirements across the enabled mods: what's unmet, cycles, and getting them. */
+function RequirementsCard({
+  instanceId,
+  loadout,
+  onLoadout,
+}: {
+  instanceId: string;
+  loadout: Loadout;
+  onLoadout: (loadout: Loadout) => void;
+}) {
+  const toast = useToast();
+  const [busy, setBusy] = useState<string | null>(null);
+  const [links, setLinks] = useState<UpdateLink[] | null>(null);
+  const unmet = loadout.mods
+    .filter((m) => m.enabled)
+    .map((m) => ({ mod: m.mod.name, deps: m.requires.filter(isUnmet) }))
+    .filter((m) => m.deps.length > 0);
+  const gettable = unmet.some((m) => m.deps.some((d) => d.state.state !== "Disabled" && d.nexus_mod_id));
+
+  const act = async (label: string, work: () => Promise<void>) => {
+    setBusy(label);
+    try {
+      await work();
+    } catch (e) {
+      toast("error", `Couldn't ${label.toLowerCase()}`, `${errorMessage(e)} Check your connection and try again.`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <section className="card" aria-busy={busy !== null}>
+      <div className="card-head-row">
+        <h2>Requirements</h2>
+        <div className="row">
+          <button
+            disabled={busy !== null}
+            onClick={() =>
+              act("Look up requirements", async () => {
+                const result = await api.fetchRequirements(instanceId, true);
+                onLoadout(result.loadout);
+                toast("success", `Looked up ${result.updated === 1 ? "1 mod" : `${result.updated} mods`} on Nexus Mods`);
+              })
+            }
+            title="Read the requirements listed on each mod's Nexus page"
+          >
+            <Icon name="refresh" className={busy === "Look up requirements" ? "spin" : undefined} /> Look up on Nexus
+          </button>
+          {gettable && (
+            <button
+              className="primary"
+              disabled={busy !== null}
+              onClick={() =>
+                act("Get missing mods", async () => {
+                  const result = await api.getMissing(instanceId);
+                  if (result.queued) toast("info", `Downloading ${result.queued === 1 ? "1 mod" : `${result.queued} mods`}`, "Follow progress in Downloads.");
+                  if (result.links.length) setLinks(result.links);
+                })
+              }
+            >
+              <Icon name="download" /> Get all missing
+            </button>
+          )}
+        </div>
+      </div>
+      {unmet.length === 0 ? (
+        <p className="status-line">
+          <Icon name="check" /> Every enabled mod has what it needs, as far as the app can tell.
+        </p>
+      ) : (
+        <ul className="drift-list">
+          {unmet.map((m) => (
+            <li key={m.mod}>
+              <strong>{m.mod}</strong>: {m.deps.map((d) => `${d.name} (${stateLabel(d).toLowerCase()})`).join(", ")}
+            </li>
+          ))}
+        </ul>
+      )}
+      {loadout.dependency_cycles.length > 0 && (
+        <div className="notice notice-warn">
+          <Icon name="alert" />
+          <div>
+            <strong>Mods that need each other in a circle</strong>
+            <p>
+              {loadout.dependency_cycles.map((c) => c.join(" → ") + " → " + c[0]).join("; ")}. Usually one of these
+              requirements is wrong; remove the one you added or check the mods' pages.
+            </p>
+          </div>
+        </div>
+      )}
+      {links && (
+        <Dialog
+          title="Download from Nexus Mods"
+          onClose={() => setLinks(null)}
+          actions={
+            <>
+              <button onClick={() => setLinks(null)}>Close</button>
+              <button
+                className="primary"
+                onClick={() => {
+                  links.forEach((l) => void openExternal(l.url));
+                  setLinks(null);
+                }}
+              >
+                <Icon name="external" /> Open all pages
+              </button>
+            </>
+          }
+        >
+          <p>On each page, click “Mod Manager Download” on the main file; it installs here.</p>
+          <ul className="missing-mods">
+            {links.map((l) => (
+              <li key={l.url}>
+                <span>{l.mod_name}</span>
+                <button onClick={() => openExternal(l.url)}>
+                  <Icon name="external" /> Files page
+                </button>
+              </li>
+            ))}
+          </ul>
+        </Dialog>
+      )}
     </section>
   );
 }

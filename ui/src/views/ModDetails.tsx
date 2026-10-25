@@ -4,6 +4,9 @@ import type { LoadoutMod } from "../bindings/LoadoutMod";
 import type { NexusStatus } from "../bindings/NexusStatus";
 import type { ModChangelog } from "../bindings/ModChangelog";
 import type { RevisionInfo } from "../bindings/RevisionInfo";
+import type { DependencyKind } from "../bindings/DependencyKind";
+import type { DependencyStatus } from "../bindings/DependencyStatus";
+import { SOURCE_LABELS, isUnmet, stateLabel } from "../deps";
 import { Icon } from "../components/Icon";
 import { KIND_LABELS, formatBytes, plural, timeAgo } from "../format";
 
@@ -22,6 +25,9 @@ export function ModDetails({
   onSkipUpdate,
   onReinstall,
   onRollback,
+  onAddDependency,
+  onRemoveDependency,
+  libraryMods,
   onIdentify,
   onEnableMod,
 }: {
@@ -39,6 +45,10 @@ export function ModDetails({
   onSkipUpdate: () => void;
   onReinstall: (revision: number, changeOptions: boolean) => Promise<void>;
   onRollback: () => Promise<void>;
+  onAddDependency: (kind: DependencyKind, target: string, optional: boolean) => Promise<boolean>;
+  onRemoveDependency: (kind: DependencyKind, target: string) => void;
+  /** Other mods of the library, for declaring a requirement. */
+  libraryMods: { id: string; name: string }[];
   onIdentify: () => Promise<void>;
   onEnableMod: (modId: string) => void;
 }) {
@@ -108,27 +118,16 @@ export function ModDetails({
       </div>
       {m.summary && <p className="summary">{m.summary}</p>}
 
-      {entry.enabled && entry.missing_requirements.length > 0 && (
+      {entry.enabled && entry.requires.some(isUnmet) && (
         <div className="callout callout-bad">
-          <strong>Won't work yet: needs {entry.missing_requirements.map((r) => r.name).join(", ")}</strong>
-          <ul className="requirements">
-            {entry.missing_requirements.map((r) => (
-              <li key={r.framework_id}>
-                <span>{r.name}</span>
-                {r.disabled_mod_id ? (
-                  <button className="primary" onClick={() => onEnableMod(r.disabled_mod_id!)}>
-                    Enable it
-                  </button>
-                ) : gameDomain && r.nexus_mod_id ? (
-                  <button onClick={() => openExternal(nexusUrls.modPage(gameDomain, r.nexus_mod_id!))}>
-                    <Icon name="external" /> Get it
-                  </button>
-                ) : (
-                  <span className="muted small">Not installed</span>
-                )}
-              </li>
-            ))}
-          </ul>
+          <strong>
+            Won't work yet:{" "}
+            {entry.requires
+              .filter(isUnmet)
+              .map((d) => `${d.name} ${stateLabel(d).toLowerCase()}`)
+              .join(", ")}
+          </strong>
+          <p>See Requires below for what to do.</p>
         </div>
       )}
 
@@ -271,6 +270,15 @@ export function ModDetails({
         )}
       </dl>
 
+      <Requirements
+        entry={entry}
+        gameDomain={gameDomain}
+        libraryMods={libraryMods}
+        onEnableMod={onEnableMod}
+        onAdd={onAddDependency}
+        onRemove={onRemoveDependency}
+      />
+
       {revisions && revisions.length > 0 && (
         <section className="history" aria-busy={historyBusy}>
           <h3>Versions</h3>
@@ -335,5 +343,141 @@ export function ModDetails({
         </button>
       </div>
     </aside>
+  );
+}
+
+function Requirements({
+  entry,
+  gameDomain,
+  libraryMods,
+  onEnableMod,
+  onAdd,
+  onRemove,
+}: {
+  entry: LoadoutMod;
+  gameDomain: string | null;
+  libraryMods: { id: string; name: string }[];
+  onEnableMod: (modId: string) => void;
+  onAdd: (kind: DependencyKind, target: string, optional: boolean) => Promise<boolean>;
+  onRemove: (kind: DependencyKind, target: string) => void;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [pick, setPick] = useState("");
+  const [nexusId, setNexusId] = useState("");
+  const [optional, setOptional] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const action = (d: DependencyStatus) => {
+    if (d.state.state === "Disabled") {
+      const modId = d.state.mod_id;
+      return (
+        <button className="primary small" onClick={() => onEnableMod(modId)}>
+          Enable
+        </button>
+      );
+    }
+    if ((d.state.state === "Missing" || d.state.state === "TooOld") && gameDomain && d.nexus_mod_id) {
+      return (
+        <button className="small" onClick={() => openExternal(nexusUrls.modPage(gameDomain, d.nexus_mod_id!))}>
+          <Icon name="external" /> Get
+        </button>
+      );
+    }
+    if (d.kind === "External" && d.url) {
+      return (
+        <button className="small" onClick={() => openExternal(d.url!)}>
+          <Icon name="external" /> Open
+        </button>
+      );
+    }
+    return null;
+  };
+
+  const add = async () => {
+    const target = pick || nexusId.trim();
+    if (!target) return;
+    setSaving(true);
+    const ok = await onAdd(pick ? "Mod" : "NexusMod", target, optional);
+    setSaving(false);
+    if (ok) {
+      setAdding(false);
+      setPick("");
+      setNexusId("");
+      setOptional(false);
+    }
+  };
+
+  return (
+    <section className="requires">
+      <h3>Requires</h3>
+      {entry.requires.length === 0 ? (
+        <p className="muted small">Nothing known. Nexus requirements are looked up after a download, or from Health.</p>
+      ) : (
+        <ul>
+          {entry.requires.map((d) => (
+            <li key={`${d.source}-${d.kind}-${d.target}`} className={isUnmet(d) ? "unmet" : undefined}>
+              <span className={`status-pill ${isUnmet(d) ? "bad" : d.state.state === "Satisfied" ? "ok" : "warn"}`}>
+                {stateLabel(d)}
+              </span>
+              <span className="requires-text">
+                <strong>{d.name}</strong>
+                {d.optional && <span className="muted"> (optional)</span>}
+                <small className="muted">
+                  {" "}
+                  · {SOURCE_LABELS[d.source]}
+                  {d.state.state === "TooOld" && ` · has ${d.state.have}, needs ${d.state.need}`}
+                  {d.state.state === "Satisfied" && d.state.by !== d.name && ` · from ${d.state.by}`}
+                  {d.notes && ` · ${d.notes}`}
+                </small>
+              </span>
+              {action(d)}
+              {d.source === "User" && (
+                <button className="icon-button" aria-label={`Remove requirement ${d.name}`} onClick={() => onRemove(d.kind, d.target)}>
+                  <Icon name="x" size={12} />
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {entry.required_by.length > 0 && (
+        <p className="small">
+          <span className="muted">Required by</span> {entry.required_by.join(", ")}
+        </p>
+      )}
+      {adding ? (
+        <div className="add-requirement">
+          <select value={pick} onChange={(e) => setPick(e.target.value)} aria-label="Mod it requires">
+            <option value="">A mod in your library…</option>
+            {libraryMods.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+          <input
+            placeholder="or a Nexus mod id"
+            value={nexusId}
+            disabled={!!pick}
+            inputMode="numeric"
+            onChange={(e) => setNexusId(e.target.value)}
+            aria-label="Nexus mod id"
+          />
+          <label className="toggle-inline small">
+            <input type="checkbox" checked={optional} onChange={(e) => setOptional(e.target.checked)} /> Optional
+          </label>
+          <div className="row">
+            <button className="primary" disabled={saving || (!pick && !nexusId.trim())} onClick={add}>
+              {saving ? "Adding…" : "Add"}
+            </button>
+            <button onClick={() => setAdding(false)}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <button className="link-button small" onClick={() => setAdding(true)}>
+          + Add a requirement
+        </button>
+      )}
+    </section>
   );
 }

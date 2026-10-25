@@ -29,6 +29,8 @@ import type { NexusUser } from "./bindings/NexusUser";
 import type { ScanResult } from "./bindings/ScanResult";
 import type { ModChangelog } from "./bindings/ModChangelog";
 import type { ReinstallResult } from "./bindings/ReinstallResult";
+import type { DependencyKind } from "./bindings/DependencyKind";
+import type { RequirementsResult } from "./bindings/RequirementsResult";
 import type { RevisionInfo } from "./bindings/RevisionInfo";
 import type { RateLimits } from "./bindings/RateLimits";
 import type { UpdateAllResult } from "./bindings/UpdateAllResult";
@@ -109,6 +111,13 @@ export const api = {
     invoke<void>("export_profile", { instanceId, profileId, path }),
   importProfile: (instanceId: string, path: string) => invoke<ImportReport>("import_profile", { instanceId, path }),
 
+  fetchRequirements: (instanceId: string, refresh: boolean) =>
+    invoke<RequirementsResult>("fetch_requirements", { instanceId, refresh }),
+  addDependency: (instanceId: string, modId: string, kind: DependencyKind, target: string, optional: boolean) =>
+    invoke<Loadout>("add_dependency", { instanceId, modId, kind, target, optional }),
+  removeDependency: (instanceId: string, modId: string, kind: DependencyKind, target: string) =>
+    invoke<Loadout>("remove_dependency", { instanceId, modId, kind, target }),
+  getMissing: (instanceId: string) => invoke<UpdateAllResult>("get_missing", { instanceId }),
   modRevisions: (modId: string) => invoke<RevisionInfo[]>("mod_revisions", { modId }),
   reinstallMod: (instanceId: string, modId: string, revision: number, changeOptions: boolean) =>
     invoke<ReinstallResult>("reinstall_mod", { instanceId, modId, revision, changeOptions }),

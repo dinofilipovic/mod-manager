@@ -25,6 +25,7 @@ use crate::archives::{
     self, ArchiveRecord, ArchiveRetention, ArchiveSource, ArchiveUsage, Hashes, Ingest,
     ModArchiveSize,
 };
+use crate::dependencies::{self, DependencyKind, DependencySource, DependencyStatus, ModNode};
 use crate::deploy::{self, DeployReport, DeploymentCheck, DesiredFile};
 use crate::detect::GameInstance;
 use crate::env::Environment;
@@ -111,6 +112,8 @@ pub struct Loadout {
     pub game: GameState,
     /// How `.archive` mods are ordered; `None` if the game has no choice.
     pub archive_order: Option<ArchiveOrder>,
+    /// Groups of enabled mods that need each other in a circle.
+    pub dependency_cycles: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -152,6 +155,11 @@ pub struct LoadoutMod {
     pub conflict_files: u32,
     /// Frameworks this mod needs that aren't available.
     pub missing_requirements: Vec<MissingRequirement>,
+    /// Everything it needs (frameworks, Nexus requirements, the user's) and
+    /// how each stands.
+    pub requires: Vec<DependencyStatus>,
+    /// Enabled mods that need this one.
+    pub required_by: Vec<String>,
 }
 
 const PROFILE_FORMAT: &str = "mod-manager-profile";
@@ -1215,6 +1223,150 @@ impl Library {
             .set_changelog(game_domain, nexus_mod_id, now(), entries)
     }
 
+    // Requirements
+
+    /// Linked mods to ask Nexus about: `(mod id, Nexus mod id)`. Without
+    /// `refresh`, only mods whose requirements weren't fetched yet.
+    pub fn requirement_targets(&self, game_id: &str, refresh: bool) -> Result<Vec<(String, u32)>> {
+        let mut targets = Vec::new();
+        for m in self.store.mods_for_game(game_id)? {
+            let Some(nexus_id) = m.nexus_mod_id else {
+                continue;
+            };
+            let fetched = self
+                .store
+                .setting(&format!("nexus_requirements:{}", m.id))?
+                .is_some();
+            if refresh || !fetched {
+                targets.push((m.id, nexus_id));
+            }
+        }
+        Ok(targets)
+    }
+
+    /// Records Nexus requirements (by Nexus mod id) for the game's mods.
+    /// Returns how many mods got requirements recorded.
+    pub fn apply_nexus_requirements(
+        &mut self,
+        game_id: &str,
+        found: &BTreeMap<u32, Vec<crate::dependencies::Dependency>>,
+    ) -> Result<u32> {
+        let mut count = 0;
+        for m in self.store.mods_for_game(game_id)? {
+            let Some(deps) = m.nexus_mod_id.and_then(|id| found.get(&id)) else {
+                continue;
+            };
+            let deps: Vec<_> = deps
+                .iter()
+                .cloned()
+                .map(|mut d| {
+                    d.mod_id = m.id.clone();
+                    d
+                })
+                .collect();
+            self.store
+                .set_dependencies(&m.id, DependencySource::Nexus, &deps)?;
+            self.store.set_setting(
+                &format!("nexus_requirements:{}", m.id),
+                Some(&now().to_string()),
+            )?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Adds a requirement the user declared: another mod of the library
+    /// (`DependencyKind::Mod`) or a Nexus mod (`DependencyKind::NexusMod`).
+    pub fn add_user_dependency(
+        &mut self,
+        mod_id: &str,
+        kind: DependencyKind,
+        target: &str,
+        optional: bool,
+    ) -> Result<()> {
+        let record = self
+            .store
+            .get_mod(mod_id)?
+            .ok_or_else(|| Error::NotFound(format!("mod {mod_id}")))?;
+        let target = target.trim();
+        match kind {
+            DependencyKind::Mod if target == mod_id => {
+                return Err(Error::Install("A mod can't require itself.".into()));
+            }
+            DependencyKind::Mod if self.store.get_mod(target)?.is_none() => {
+                return Err(Error::NotFound(format!("mod {target}")));
+            }
+            DependencyKind::NexusMod if target.parse::<u32>().is_err() => {
+                return Err(Error::Install(
+                    "Enter the Nexus mod id: the number in the mod page's address.".into(),
+                ));
+            }
+            DependencyKind::Mod | DependencyKind::NexusMod => {}
+            _ => {
+                return Err(Error::Install(
+                    "Choose a mod from the library or enter a Nexus mod id.".into(),
+                ));
+            }
+        }
+        let mut deps: Vec<_> = self
+            .store
+            .dependencies(&record.game_id)?
+            .into_iter()
+            .filter(|d| d.mod_id == mod_id && d.source == DependencySource::User)
+            .filter(|d| !(d.kind == kind && d.target == target))
+            .collect();
+        deps.push(crate::dependencies::Dependency {
+            mod_id: mod_id.to_string(),
+            kind,
+            target: target.to_string(),
+            min_version: None,
+            optional,
+            source: DependencySource::User,
+            notes: None,
+            url: None,
+        });
+        self.store
+            .set_dependencies(mod_id, DependencySource::User, &deps)
+    }
+
+    /// Removes a requirement the user declared.
+    pub fn remove_user_dependency(
+        &mut self,
+        mod_id: &str,
+        kind: DependencyKind,
+        target: &str,
+    ) -> Result<()> {
+        let record = self
+            .store
+            .get_mod(mod_id)?
+            .ok_or_else(|| Error::NotFound(format!("mod {mod_id}")))?;
+        let deps: Vec<_> = self
+            .store
+            .dependencies(&record.game_id)?
+            .into_iter()
+            .filter(|d| d.mod_id == mod_id && d.source == DependencySource::User)
+            .filter(|d| !(d.kind == kind && d.target == target))
+            .collect();
+        self.store
+            .set_dependencies(mod_id, DependencySource::User, &deps)
+    }
+
+    /// Enabled mods in the active profile that need this mod.
+    pub fn dependents(
+        &mut self,
+        game: &GameDefinition,
+        instance: &GameInstance,
+        mod_id: &str,
+    ) -> Result<Vec<String>> {
+        Ok(self
+            .loadout(game, instance)?
+            .mods
+            .into_iter()
+            .find(|m| m.record.id == mod_id)
+            .map(|m| m.required_by)
+            .unwrap_or_default())
+    }
+
     // Reinstall, roll back, change options
 
     /// Installs a revision of a mod again from its stored archive, with the
@@ -1809,6 +1961,35 @@ impl Library {
             })
         };
         self.set_framework_versions(game, instance, &mut analysis.frameworks, &mods);
+        let mut dependencies = {
+            let nodes: Vec<ModNode> = entries
+                .iter()
+                .zip(&files)
+                .filter_map(|(e, f)| {
+                    let m = mods.get(&e.mod_id)?;
+                    Some(ModNode {
+                        id: &m.id,
+                        name: &m.name,
+                        version: m.version.as_deref(),
+                        nexus_mod_id: m.nexus_mod_id,
+                        enabled: e.enabled,
+                        provides: game
+                            .frameworks
+                            .iter()
+                            .filter(|fw| requirements::provides(fw, f))
+                            .map(|fw| fw.id.clone())
+                            .collect(),
+                    })
+                })
+                .collect();
+            dependencies::resolve(
+                game,
+                &nodes,
+                &self.store.dependencies(&game.id)?,
+                &analysis.frameworks,
+                &analysis.needs,
+            )
+        };
 
         let loadout_mods = entries
             .iter()
@@ -1827,6 +2008,11 @@ impl Library {
                         .missing
                         .get(&e.mod_id)
                         .cloned()
+                        .unwrap_or_default(),
+                    requires: dependencies.requires.remove(&e.mod_id).unwrap_or_default(),
+                    required_by: dependencies
+                        .required_by
+                        .remove(&e.mod_id)
                         .unwrap_or_default(),
                 })
             })
@@ -1855,6 +2041,7 @@ impl Library {
             deployed_at: self.store.deployed_at(&instance.id)?,
             game: self.game_state(instance, &analysis.frameworks, &mods)?,
             frameworks: analysis.frameworks,
+            dependency_cycles: dependencies.cycles,
             archive_order: game
                 .load_order
                 .as_ref()

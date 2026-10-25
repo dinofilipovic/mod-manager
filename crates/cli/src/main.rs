@@ -84,6 +84,14 @@ enum Command {
         #[arg(long)]
         instance: Option<String>,
     },
+    /// Show what each mod requires and whether it's there.
+    Deps {
+        #[arg(long)]
+        instance: Option<String>,
+        /// Look up the requirements on the mods' Nexus pages first.
+        #[arg(long)]
+        fetch: bool,
+    },
     /// Check that deployed files are still as they were placed.
     Verify {
         #[arg(long)]
@@ -206,6 +214,47 @@ fn main() -> Result<()> {
                 library.reinstall(&game, &mod_id, revision, Some(&instance.id), false)?;
             report_prepared(&mut library, &game, prepared, cli.json)?;
         }
+        Command::Deps { instance, fetch } => {
+            let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
+            let mut library = open_library()?;
+            if fetch && let Some(domain) = game.stores.nexus_domain.as_deref() {
+                let ids: Vec<u32> = library
+                    .requirement_targets(&game.id, true)?
+                    .into_iter()
+                    .map(|(_, id)| id)
+                    .collect();
+                let found = mm_core::dependencies::fetch_requirements(
+                    &mm_core::collections::graphql_url(),
+                    None,
+                    domain,
+                    &ids,
+                    env!("CARGO_PKG_VERSION"),
+                )?;
+                let n = library.apply_nexus_requirements(&game.id, &found)?;
+                eprintln!("Looked up {n} mods on Nexus Mods.");
+            }
+            let loadout = library.loadout(&game, &instance)?;
+            if cli.json {
+                let mods: Vec<_> = loadout
+                    .mods
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "id": m.record.id,
+                            "name": m.record.name,
+                            "enabled": m.enabled,
+                            "requires": m.requires,
+                            "required_by": m.required_by,
+                        })
+                    })
+                    .collect();
+                let report =
+                    serde_json::json!({ "mods": mods, "cycles": loadout.dependency_cycles });
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_deps(&loadout);
+            }
+        }
         Command::Verify { instance } => {
             let (game, instance) = pick_instance(instance, cli.bottles_dir.as_deref())?;
             let check = open_library()?.verify_deployment(&game, &instance)?;
@@ -234,6 +283,51 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn print_deps(loadout: &mm_core::library::Loadout) {
+    use mm_core::dependencies::DependencyState;
+    let mut unmet = 0;
+    for m in loadout
+        .mods
+        .iter()
+        .filter(|m| m.enabled && !m.requires.is_empty())
+    {
+        println!("{}", m.record.name);
+        for d in &m.requires {
+            let state = match &d.state {
+                DependencyState::Satisfied { by } => format!("ok ({by})"),
+                DependencyState::Missing if d.optional => "optional, not installed".into(),
+                DependencyState::Missing => "MISSING".into(),
+                DependencyState::Disabled { .. } => "DISABLED: enable it".into(),
+                DependencyState::TooOld { have, need } => format!("TOO OLD: {have}, needs {need}"),
+                DependencyState::Unverifiable => "check yourself".into(),
+            };
+            if d.is_unmet() {
+                unmet += 1;
+            }
+            let link = d
+                .nexus_mod_id
+                .filter(|_| d.is_unmet())
+                .map(|id| format!(" (Nexus mod {id})"))
+                .unwrap_or_default();
+            println!("    {:<28} {state}{link}", d.name);
+        }
+        if !m.required_by.is_empty() {
+            println!("    required by {}", m.required_by.join(", "));
+        }
+    }
+    for cycle in &loadout.dependency_cycles {
+        println!(
+            "\nThese mods need each other in a circle: {}",
+            cycle.join(" -> ")
+        );
+    }
+    if unmet == 0 {
+        println!("\nEvery enabled mod has what it needs, as far as can be told.");
+    } else {
+        println!("\n{unmet} requirements unmet.");
+    }
 }
 
 fn print_health(loadout: &mm_core::library::Loadout, logs: &[mm_core::health::LogReport]) {

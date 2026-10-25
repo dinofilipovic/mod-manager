@@ -2,6 +2,7 @@ import { useRef, useState, type PointerEvent } from "react";
 import type { LoadoutMod } from "../bindings/LoadoutMod";
 import { Icon } from "../components/Icon";
 import { KIND_LABELS, formatBytes } from "../format";
+import { isUnmet, stateLabel, unmetSummary } from "../deps";
 
 type Drag = { id: string; from: number; over: number };
 
@@ -60,6 +61,7 @@ export function ModList({
     <ol className={`mod-list${drag ? " dragging" : ""}`} onPointerMove={move} onPointerUp={end} onPointerCancel={() => setDrag(null)}>
       {mods.map((entry, i) => {
         const m = entry.mod;
+        const unmet = entry.requires.filter(isUnmet);
         const dropBefore = drag && drag.over === i && i !== drag.from && i !== drag.from + 1;
         const dropAfter = drag && i === mods.length - 1 && drag.over === mods.length && drag.from !== i;
         return (
@@ -110,13 +112,9 @@ export function ModList({
                 </span>
               </span>
               <span className="mod-badges">
-                {entry.enabled && entry.missing_requirements.length > 0 && (
-                  <span
-                    className="badge badge-error"
-                    title={`Needs ${entry.missing_requirements.map((r) => r.name).join(", ")}`}
-                  >
-                    <Icon name="alert" size={11} /> Needs {entry.missing_requirements[0].name}
-                    {entry.missing_requirements.length > 1 ? ` +${entry.missing_requirements.length - 1}` : ""}
+                {entry.enabled && unmet.length > 0 && (
+                  <span className="badge badge-error" title={unmet.map((d) => `${d.name}: ${stateLabel(d)}`).join("\n")}>
+                    <Icon name="alert" size={11} /> {unmetSummary(unmet)}
                   </span>
                 )}
                 {m.update_file_id && <span className="badge badge-update">Update {m.update_version ?? ""}</span>}

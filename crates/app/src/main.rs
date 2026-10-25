@@ -141,6 +141,10 @@ fn main() {
             commands::reinstall_mod,
             commands::rollback_mod,
             commands::set_revisions_kept,
+            commands::fetch_requirements,
+            commands::add_dependency,
+            commands::remove_dependency,
+            commands::get_missing,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start the app");

@@ -40,6 +40,7 @@ type DialogState =
   | { kind: "remove-mod"; modId: string; name: string }
   | { kind: "rename-mod"; modId: string; name: string }
   | { kind: "update-links"; links: UpdateLink[] }
+  | { kind: "disable-mod"; modId: string; name: string; dependents: string[] }
   | null;
 
 function describeReport(r: DeployReport): string {
@@ -573,6 +574,11 @@ export function GameView({
               selectedId={selected}
               onSelect={(modId) => setSelected(modId === selected ? null : modId)}
               onToggle={async (modId, enabled) => {
+                const entry = mods.find((m) => m.mod.id === modId);
+                if (!enabled && entry && entry.required_by.length > 0) {
+                  setDialog({ kind: "disable-mod", modId, name: entry.mod.name, dependents: entry.required_by });
+                  return;
+                }
                 const next = await run(enabled ? "Enabling" : "Disabling", () => api.setModEnabled(id, modId, enabled));
                 if (next) setLoadout(next);
               }}
@@ -649,6 +655,16 @@ export function GameView({
           }}
           onPin={async (pinned) => {
             const next = await run(pinned ? "Pinning" : "Unpinning", () => api.setModPinned(id, selectedMod.mod.id, pinned));
+            if (next) setLoadout(next);
+          }}
+          libraryMods={mods.filter((m) => m.mod.id !== selectedMod.mod.id).map((m) => ({ id: m.mod.id, name: m.mod.name }))}
+          onAddDependency={async (kind, target, optional) => {
+            const next = await run("Adding requirement", () => api.addDependency(id, selectedMod.mod.id, kind, target, optional));
+            if (next) setLoadout(next);
+            return !!next;
+          }}
+          onRemoveDependency={async (kind, target) => {
+            const next = await run("Removing requirement", () => api.removeDependency(id, selectedMod.mod.id, kind, target));
             if (next) setLoadout(next);
           }}
           onReinstall={async (revision, changeOptions) => {
@@ -845,10 +861,30 @@ export function GameView({
           onClose={() => setDialog(null)}
         />
       )}
+      {dialog?.kind === "disable-mod" && (
+        <ConfirmDialog
+          title={`Disable ${dialog.name}?`}
+          message={`${dialog.dependents.join(", ")} ${dialog.dependents.length === 1 ? "needs" : "need"} it and won't work without it.`}
+          confirmLabel="Disable anyway"
+          danger
+          onConfirm={async () => {
+            const next = await run("Disabling", () => api.setModEnabled(id, dialog.modId, false));
+            if (next) setLoadout(next);
+          }}
+          onClose={() => setDialog(null)}
+        />
+      )}
       {dialog?.kind === "remove-mod" && (
         <ConfirmDialog
           title={`Remove ${dialog.name}?`}
-          message="It's deleted from the library and every profile. Its files leave the game folder when you next apply."
+          message={
+            (mods.find((m) => m.mod.id === dialog.modId)?.required_by.length
+              ? `${mods.find((m) => m.mod.id === dialog.modId)!.required_by.join(", ")} need${
+                  mods.find((m) => m.mod.id === dialog.modId)!.required_by.length === 1 ? "s" : ""
+                } it and won't work without it. `
+              : "") +
+            "It's deleted from the library and every profile. Its files leave the game folder when you next apply."
+          }
           confirmLabel="Remove mod"
           danger
           onConfirm={async () => {
