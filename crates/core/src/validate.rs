@@ -375,6 +375,10 @@ mod tests {
 
     fn write(root: &Path, files: &[(&str, &[u8])]) -> Vec<String> {
         for (target, data) in files {
+            // Windows refuses these names; the name checks don't need the file.
+            if cfg!(windows) && target.split('/').any(|c| windows_name_problem(c).is_some()) {
+                continue;
+            }
             let path = join(root, target);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, data).unwrap();
