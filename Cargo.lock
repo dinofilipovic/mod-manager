@@ -2714,7 +2714,7 @@ dependencies = [
 
 [[package]]
 name = "mm-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "mm-core",
@@ -2735,7 +2735,7 @@ dependencies = [
 
 [[package]]
 name = "mm-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2745,7 +2745,7 @@ dependencies = [
 
 [[package]]
 name = "mm-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dirs 6.0.0",
  "keyring",
