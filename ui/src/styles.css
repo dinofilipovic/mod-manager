@@ -400,6 +400,8 @@ input::placeholder {
 .game-view {
   display: grid;
   grid-template-columns: 1fr;
+  /* One row exactly as tall as the window, so its panes scroll inside it. */
+  grid-template-rows: minmax(0, 1fr);
   height: 100%;
 }
 
@@ -414,6 +416,14 @@ input::placeholder {
   flex-direction: column;
   gap: 16px;
   min-width: 0;
+  min-height: 0;
+}
+
+/* Scrolling columns: children keep their full height and the column scrolls,
+   instead of flexbox squeezing them (which clips the mod list). */
+.game-main > *,
+.page > * {
+  flex-shrink: 0;
 }
 
 .game-header {
